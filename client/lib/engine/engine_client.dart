@@ -115,9 +115,14 @@ class EngineClient {
       VodPage.fromJson(await _send('GET', 'sites/${_seg(site)}/search', query: {'wd': keyword, 'pg': '$page'}));
 
   /// [direct]: the player will fetch the video from the source itself (see [PlayInfo.relay]); older engines ignore it.
-  Future<PlayInfo> resolvePlay(String site, String line, String episodeId, {bool direct = false}) async => PlayInfo.fromJson(
-    await _send('POST', 'play/resolve', body: {'site': site, 'line': line, 'episodeId': episodeId, if (direct) 'direct': true}),
+  Future<PlayInfo> resolvePlay(String site, String line, String episodeId, {bool direct = false, bool offerDriveSignIn = false}) async => PlayInfo.fromJson(
+    await _send('POST', 'play/resolve', body: {'site': site, 'line': line, 'episodeId': episodeId, if (direct) 'direct': true, if (offerDriveSignIn) 'offerDriveSignIn': true}),
   );
+
+  Future<String> pollDriveSignIn(String site, String handle) async {
+    final reply = await _send('POST', 'play/drive-sign-in/poll', body: {'site': site, 'handle': handle}) as Map<String, dynamic>;
+    return reply['status'] as String;
+  }
 
   // ---- library ----
 

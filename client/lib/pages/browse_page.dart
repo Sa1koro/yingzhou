@@ -126,6 +126,7 @@ class _SiteBrowserState extends State<_SiteBrowser> {
     final client = AppScope.read(context).client;
     final library = widget.simple ? _watchedAnything(client) : Future.value(false);
     _home = client.home(widget.site.key, refresh: refresh).then((home) async => (home, await library));
+    _home.ignore();
   }
 
   static Future<bool> _watchedAnything(EngineClient client) async {

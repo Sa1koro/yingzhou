@@ -4,6 +4,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import tvbox.engine.core.config.SiteBean
 import tvbox.engine.core.model.HomeResult
+import tvbox.engine.core.model.DriveSignInPrompt
+import tvbox.engine.core.model.DriveSignInStatus
 import tvbox.engine.core.model.VodDetail
 import tvbox.engine.core.model.VodPage
 import tvbox.engine.core.site.PlayerResult
@@ -26,6 +28,7 @@ class SpiderSource(
     private val vipFlags: () -> List<String>,
 ) : SiteSource {
     private val lock = Mutex()
+    private val driveSignIn = OwnDriveSignIn()
     @Volatile private var spider: Spider? = null
 
     /** Loading a spider (download + compile + init) gets more time than a normal call. */
@@ -70,8 +73,15 @@ class SpiderSource(
         readResult("spider.search") { TvboxResult.parseList(bean.key, search(keyword, quick, page.toString()).orEmptyObject()) }
     }
 
-    override suspend fun play(line: String, episodeId: String): RawPlay = spider().run {
+    override suspend fun play(line: String, episodeId: String): RawPlay = play(line, episodeId, false)
+
+    internal class DriveSignInRequired(val prompt: DriveSignInPrompt) : Exception()
+
+    internal suspend fun play(line: String, episodeId: String, offerDriveSignIn: Boolean): RawPlay = spider().run {
         val text = play(line, episodeId, vipFlags())
+        if (offerDriveSignIn && !text.isNullOrBlank()) {
+            driveSignIn.start(this, text)?.let { throw DriveSignInRequired(it) }
+        }
         readResult("spider.play") {
             if (!text.isNullOrBlank()) return@readResult PlayerResult.parse(text, defaultUrl = if (episodeId.startsWith("http")) episodeId else "", flag = line)
             // TVBox plays an http id directly when the spider has no answer.
@@ -79,6 +89,9 @@ class SpiderSource(
             throw SiteResultException("spider returned no play info")
         }
     }
+
+    internal suspend fun pollDriveSignIn(handle: String): DriveSignInStatus =
+        spider?.let { driveSignIn.poll(it, handle) } ?: DriveSignInStatus("expired")
 
     suspend fun proxy(params: Map<String, String>): ProxyResponse? = spider().proxy(params)
 

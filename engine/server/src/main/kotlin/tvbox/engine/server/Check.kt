@@ -14,6 +14,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.put
+import okhttp3.OkHttpClient
 import tvbox.engine.core.Engine
 import tvbox.engine.core.EngineException
 import tvbox.engine.core.model.PlayRequest
@@ -55,6 +56,9 @@ class Checker(private val engine: Engine, private val options: Options, private 
         val stepTimeoutMs: Long = 45_000,
         /** Sites left out, by key, with the reason (the demo's site whose lines are all dead, in the self-test). */
         val skip: Map<String, String> = emptyMap(),
+        val siteKeys: Set<String> = emptySet(),
+        val mediaClient: OkHttpClient? = null,
+        val checkMirrors: Boolean = false,
     )
 
     data class SiteCheck(
@@ -76,6 +80,10 @@ class Checker(private val engine: Engine, private val options: Options, private 
         val ms: Long = 0,
         val diagnostic: SpiderDiagnostic? = null,
         val warning: SpiderDiagnostic? = null,
+        val reached: String = "",
+        val media: String = "",
+        val mediaBytes: Int = 0,
+        val midpoint: String = "",
     )
 
     data class LiveCheck(
@@ -103,6 +111,7 @@ class Checker(private val engine: Engine, private val options: Options, private 
 
     /** Configs already checked, by their sites: mirrors of one config are checked once. */
     private val checkedSites = HashMap<String, String>()
+    private val media = options.mediaClient?.let(::CheckMedia)
 
     /** [progress] gets the results so far after every config, so a report exists even when the run is cut short. */
     suspend fun run(subscriptions: List<String>, progress: (List<ConfigCheck>) -> Unit = {}): List<ConfigCheck> {
@@ -159,13 +168,16 @@ class Checker(private val engine: Engine, private val options: Options, private 
     private suspend fun checkActive(subscription: String, name: String, url: String): ConfigCheck = coroutineScope {
         val all = engine.sites()
         val signature = engine.summary().spider + "|" + all.joinToString("|") { it.key + ":" + it.name }
-        checkedSites[signature]?.let { same ->
-            log("== $name: 与「$same」的站点相同，不重复检查  $url")
-            return@coroutineScope ConfigCheck(subscription, name, url, sameAs = same)
+        if (options.siteKeys.isEmpty() && !options.checkMirrors) {
+            checkedSites[signature]?.let { same ->
+                log("== $name: 与「$same」的站点相同，不重复检查  $url")
+                return@coroutineScope ConfigCheck(subscription, name, url, sameAs = same)
+            }
+            checkedSites[signature] = name
         }
-        checkedSites[signature] = name
         log("== $name: ${all.size} 个站点  $url")
-        val sites = if (options.maxSites > 0) all.take(options.maxSites) else all
+        val selected = if (options.siteKeys.isEmpty()) all else all.filter { it.key in options.siteKeys }
+        val sites = if (options.maxSites > 0) selected.take(options.maxSites) else selected
         val gate = Semaphore(options.parallel)
         val checks = sites.map { site ->
             async {
@@ -182,7 +194,7 @@ class Checker(private val engine: Engine, private val options: Options, private 
                 }
             }
         }.awaitAll()
-        val lives = if ("live" in options.only) checkLives() else emptyList()
+        val lives = if (options.siteKeys.isEmpty() && "live" in options.only) checkLives() else emptyList()
         ConfigCheck(subscription, name, url, sites = checks, lives = lives)
     }
 
@@ -201,11 +213,13 @@ class Checker(private val engine: Engine, private val options: Options, private 
                 val warning = home.warning ?: return done().copy(verdict = "empty", step = "home", message = "首页没有分类也没有影片")
                 return done().copy(verdict = "fail", cause = cause("SITE_ERROR", warning.summary(), warning), step = "home", message = warning.summary(), diagnostic = warning, warning = null)
             }
+            check = check.copy(reached = "home")
             if (home.classes.isNotEmpty()) {
                 step = "category"
                 val page = withTimeout(options.stepTimeoutMs) { engine.category(site.key, home.classes.first().id, 1, emptyMap()) }
                 if (page.list.isNotEmpty()) items = page.list
                 check = check.copy(items = maxOf(check.items, page.list.size))
+                if (page.list.isNotEmpty()) check = check.copy(reached = "category")
             }
             if (items.isEmpty()) return done().copy(verdict = "empty", step = step, message = "第一个分类下没有影片")
             // A recommendation site (Douban) lists videos that are found by their title on the other sites.
@@ -216,6 +230,7 @@ class Checker(private val engine: Engine, private val options: Options, private 
                 step = "folder"
                 val inner = withTimeout(options.stepTimeoutMs) { engine.category(site.key, item.id, 1, emptyMap()) }.list
                 if (inner.isEmpty()) return done().copy(verdict = "empty", step = step, message = "文件夹《${item.name}》里没有影片")
+                check = check.copy(reached = "folder")
                 item = firstToOpen(inner.map { it.id })?.let { i -> inner[i] } ?: return done().copy(message = RECOMMENDATION)
                 levels++
             }
@@ -224,14 +239,21 @@ class Checker(private val engine: Engine, private val options: Options, private 
             val episodes = detail.lines.sumOf { it.episodes.size }
             check = check.copy(lines = detail.lines.size, episodes = episodes)
             if (episodes == 0) return done().copy(verdict = "empty", step = "detail", message = "《${item.name}》没有可播放的剧集")
+            check = check.copy(reached = "detail")
             if (options.play) {
                 step = "play"
                 val line = detail.lines.first { it.episodes.isNotEmpty() }
                 val info = withTimeout(options.stepTimeoutMs * 2) { engine.resolvePlay(PlayRequest(site.key, line.name, line.episodes.first().id)) }
-                val target = if (info.kind == "direct") info.url else info.sniff?.pageUrl.orEmpty()
-                check = check.copy(play = info.kind + " " + target.substringAfter("://").substringBefore('/').take(60) + info.parsedBy.let { if (it.isEmpty()) "" else " ($it)" })
+                check = check.copy(play = info.kind, reached = "play")
+                if (media != null) {
+                    step = "media"
+                    val evidence = withTimeout(options.stepTimeoutMs * 2) { media.read(info) }
+                    check = check.copy(reached = "media", media = evidence.transport, mediaBytes = evidence.bytes, midpoint = evidence.midpoint)
+                }
             }
             return done()
+        } catch (error: CheckMedia.Failure) {
+            return done().copy(verdict = "fail", cause = if (error.reason.startsWith("需要客户端")) "unsupported" else "network", step = step, message = error.reason)
         } catch (e: Throwable) {
             if (e is CancellationException && e !is TimeoutCancellationException) throw e
             val (code, message) = when (e) {
@@ -376,6 +398,14 @@ class Checker(private val engine: Engine, private val options: Options, private 
             }
         }
 
+        fun unverifiedSites(configs: List<ConfigCheck>, required: Set<String>, requirePlay: Boolean): List<String> {
+            val results = configs.flatMap { it.sites }.groupBy { it.key }
+            return required.filter { key ->
+                val matches = results[key]
+                matches.isNullOrEmpty() || matches.any { it.verdict != "pass" || (requirePlay && it.play.isEmpty()) }
+            }
+        }
+
         fun markdown(configs: List<ConfigCheck>, header: List<String>): String = buildString {
             fun cell(s: String) = s.replace("|", "\\|").replace("\n", " ")
             appendLine("# 配置体检报告")
@@ -442,18 +472,18 @@ class Checker(private val engine: Engine, private val options: Options, private 
                     if (list.isEmpty()) continue
                     appendLine("### $title（${list.size}）")
                     appendLine()
-                    appendLine("| 站点 | key | 类型 | 步骤 | 信息 |")
-                    appendLine("|---|---|---|---|---|")
-                    list.forEach { appendLine("| ${cell(it.name)} | ${cell(it.key)} | ${it.runtime} | ${it.step} | ${cell(it.message)} |") }
+                    appendLine("| 站点 | key | 类型 | 最后通过 | 失败步骤 | 信息 |")
+                    appendLine("|---|---|---|---|---|---|")
+                    list.forEach { appendLine("| ${cell(it.name)} | ${cell(it.key)} | ${it.runtime} | ${it.reached} | ${it.step} | ${cell(it.message)} |") }
                     appendLine()
                 }
                 val passed = c.sites.filter { it.verdict == "pass" }
                 if (passed.isNotEmpty()) {
                     appendLine("### 通过（${passed.size}）")
                     appendLine()
-                    appendLine("| 站点 | 类型 | 分类 | 影片 | 线路 | 剧集 | 播放 | 耗时 |")
-                    appendLine("|---|---|---|---|---|---|---|---|")
-                    passed.forEach { appendLine("| ${cell(it.name)} | ${it.runtime} | ${it.classes} | ${it.items} | ${it.lines} | ${it.episodes} | ${cell(it.play.ifEmpty { it.message })} | ${it.ms}ms |") }
+                    appendLine("| 站点 | 类型 | 分类 | 影片 | 线路 | 剧集 | 最后通过 | 播放解析 | 媒体字节 | 中段 | 耗时 |")
+                    appendLine("|---|---|---|---|---|---|---|---|---|---|---|")
+                    passed.forEach { appendLine("| ${cell(it.name)} | ${it.runtime} | ${it.classes} | ${it.items} | ${it.lines} | ${it.episodes} | ${it.reached} | ${cell(it.play.ifEmpty { it.message })} | ${it.mediaBytes} | ${it.midpoint} | ${it.ms}ms |") }
                     appendLine()
                 }
                 c.sites.forEach { site ->
@@ -500,6 +530,7 @@ class Checker(private val engine: Engine, private val options: Options, private 
             put("key", s.key); put("name", s.name); put("runtime", s.runtime); put("verdict", s.verdict); put("cause", s.cause)
             put("step", s.step); put("message", s.message); put("classes", s.classes); put("items", s.items)
             put("lines", s.lines); put("episodes", s.episodes); put("play", s.play); put("ms", s.ms)
+            put("reached", s.reached); put("media", s.media); put("mediaBytes", s.mediaBytes); put("midpoint", s.midpoint)
             s.diagnostic?.let { put("diagnostic", Json.encodeToJsonElement(it)) }
             s.warning?.let { put("warning", Json.encodeToJsonElement(it)) }
         }

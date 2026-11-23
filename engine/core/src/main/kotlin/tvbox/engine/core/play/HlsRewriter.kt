@@ -60,9 +60,9 @@ object HlsRewriter {
     /** Extensions a player takes as media when it checks what a segment is called. */
     private val MEDIA_EXT = setOf("ts", "m4s", "mp4", "m4v", "m4a", "aac", "mp3", "ac3", "ec3", "vtt", "webvtt", "cmfv", "cmfa", "mpeg", "mpg", "m2ts", "mts")
 
-    fun rewrite(text: String, baseUrl: String): Result? {
+    fun rewrite(text: String, baseUrl: String, allowLive: Boolean = false): Result? {
         val lines = text.removePrefix("﻿").replace("\r\n", "\n").replace('\r', '\n').split('\n')
-        if (lines.none { it.trim() == "#EXT-X-ENDLIST" }) return null
+        if (!allowLive && lines.none { it.trim() == "#EXT-X-ENDLIST" }) return null
         val fragmented = lines.any { it.startsWith("#EXT-X-MAP") }
 
         class Draft(val kind: Kind, val url: String, val start: Long, val length: Long, val startMs: Long, val durationMs: Long)

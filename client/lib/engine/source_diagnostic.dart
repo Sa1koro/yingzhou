@@ -1,5 +1,5 @@
 class SourceDiagnostic {
-  const SourceDiagnostic._(this.stage, this.site, this.kind, this.cause, this.archive, this.initCause);
+  const SourceDiagnostic._(this.stage, this.site, this.kind, this.cause, this.archive, this.initCause, this.nativeOperation, this.initNativeOperation);
 
   final String stage;
   final String site;
@@ -7,6 +7,8 @@ class SourceDiagnostic {
   final String cause;
   final String archive;
   final String initCause;
+  final String nativeOperation;
+  final String initNativeOperation;
 
   static SourceDiagnostic? tryParse(Object? json) {
     if (json is! Map<String, dynamic>) return null;
@@ -24,6 +26,8 @@ class SourceDiagnostic {
       cause,
       archive is String && _archiveId.hasMatch(archive) ? archive : '',
       _safeCause(json['initCause']),
+      _safeNativeOperation(json['nativeOperation']),
+      _safeNativeOperation(json['initNativeOperation']),
     );
   }
 
@@ -34,6 +38,25 @@ class SourceDiagnostic {
   static final _exception = RegExp(r'^([A-Za-z_$][A-Za-z0-9_$]{0,75}(?:Error|Exception)|Error|Exception|Throwable)(?:$|\b)');
   static final _javaSymbol = RegExp(r'^(?:android|androidx|dalvik|java|com\.github\.catvod)(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+$');
   static final _httpCode = RegExp(r'^HTTP [1-5]\d\d$');
+  static final _nativeSymbol = RegExp(r'^(?:JNI method|JNI callback) (?:[A-Za-z0-9_$]+/)*[A-Za-z0-9_$]+->(?:[A-Za-z_$][A-Za-z0-9_$]*|<init>)(?:\([A-Za-z0-9_$/;\[]*\)|:)[A-Za-z0-9_$/;\[]+$');
+
+  static String _safeNativeOperation(Object? value) =>
+      value is String && value.length <= 240 && _nativeSymbol.firstMatch(value)?.end == value.length ? value : '';
+  static const _nativeReasons = {
+    'Android JNI: unsupported signature': '原生方法的参数或返回类型尚不支持',
+    'Android JNI: guest timed out': 'Android 原生代码执行超时',
+    'Android JNI: guest unavailable': 'Android 原生运行环境不可用',
+    'Android JNI: native call failed': 'Android 原生方法调用失败',
+    'Android JNI: unsupported Java callback': 'Android 原生代码需要的 Java 回调尚不支持',
+    'Android JNI: Java callback failed': 'Android 原生代码发起的 Java 回调执行失败',
+    'Android JNI: guest nesting limit': 'Android 原生调用超过嵌套层数上限',
+    'Android JNI: library path inaccessible': '无法访问 Android 原生库路径',
+    'Android JNI: guest initialization failed': 'Android 原生运行环境初始化失败',
+    'Android JNI: native dependency missing': '缺少原生库依赖',
+    'Android JNI: native symbols unresolved': '找不到原生库引用的符号',
+    'Android JNI: native method not bound': '找不到该 JNI 方法的绑定',
+    'Android JNI: JNI_OnLoad failed': '原生库在 JNI_OnLoad 初始化时失败',
+  };
   static const _hints = {
     'armeabi-v7a',
     'arm64-v8a',
@@ -49,11 +72,6 @@ class SourceDiagnostic {
     'site returned no play url',
     'empty quality list',
     'spider returned no play info',
-    'Android JNI: unsupported signature',
-    'Android JNI: guest timed out',
-    'Android JNI: guest unavailable',
-    'Android JNI: native call failed',
-    'Android JNI: guest initialization failed',
     'response does not contain a JAR',
     'empty JAR response',
     'invalid subscription document',
@@ -72,7 +90,7 @@ class SourceDiagnostic {
     if (type == null) return '未识别的异常';
     if (!value.startsWith('$type: ') || value.length > 210) return type;
     final hint = value.substring(type.length + 2);
-    return _hints.contains(hint) || _httpCode.hasMatch(hint) || _javaSymbol.hasMatch(hint) ? '$type: $hint' : type;
+    return _hints.contains(hint) || _nativeReasons.containsKey(hint) || _httpCode.hasMatch(hint) || _javaSymbol.hasMatch(hint) ? '$type: $hint' : type;
   }
 
   String get stageLabel =>
@@ -96,6 +114,14 @@ class SourceDiagnostic {
       stage;
 
   String get kindLabel {
+    if (kind == 'native') {
+      const prefix = 'UnsatisfiedLinkError: ';
+      final nativeCause = _sharedInitWrapper ? initCause : cause;
+      if (nativeCause.startsWith(prefix)) {
+        final label = _nativeReasons[nativeCause.substring(prefix.length)];
+        if (label != null) return _sharedInitWrapper ? '共享蜘蛛包：$label' : label;
+      }
+    }
     if (kind == 'network') {
       if (cause == 'UnknownHostException') return '域名解析失败（DNS）';
       if (cause == 'SocketTimeoutException') return '网络请求超时';
@@ -122,13 +148,18 @@ class SourceDiagnostic {
 
   String get summary => '$stageLabel · $kindLabel';
 
+  bool get _sharedInitWrapper => stage.startsWith('spider.') && initCause.isNotEmpty &&
+      (cause == 'ExceptionInInitializerError' || cause == 'UnsatisfiedLinkError: Android JNI: guest unavailable');
+
   Map<String, String> get details => {
     if (site.isNotEmpty) '站点': site,
     '阶段': '$stageLabel ($stage)',
     '类别': '$kindLabel ($kind)',
-    '根因': cause,
+    (_sharedInitWrapper ? '站点异常' : '根因'): cause,
+    if (nativeOperation.isNotEmpty) 'JNI 调用': nativeOperation,
     if (archive.isNotEmpty) '蜘蛛包缓存标识': archive,
     if (initCause.isNotEmpty) '共享包首次初始化': initCause,
+    if (initNativeOperation.isNotEmpty) '共享包首次失败的 JNI 调用': initNativeOperation,
   };
 
   String get report => details.entries.map((entry) => '${entry.key}：${entry.value}').join('\n');

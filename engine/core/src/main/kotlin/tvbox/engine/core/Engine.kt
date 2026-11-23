@@ -13,6 +13,8 @@ import tvbox.engine.core.config.SiteRuntime
 import tvbox.engine.core.config.TvboxConfig
 import tvbox.engine.core.model.ApiError
 import tvbox.engine.core.model.ConfigSummary
+import tvbox.engine.core.model.DriveSignInPoll
+import tvbox.engine.core.model.DriveSignInStatus
 import tvbox.engine.core.model.EngineInfo
 import tvbox.engine.core.model.HomeResult
 import tvbox.engine.core.model.PlayInfo
@@ -623,7 +625,14 @@ class Engine(
         // A finished download plays from the engine's disk, without the site or the network.
         downloads?.offlinePlay(request)?.let { return it }
         val a = current()
-        val raw = siteCall(request.site) { it.play(request.line, request.episodeId) }
+        val raw = try {
+            siteCall(request.site) { source ->
+                if (source is SpiderSource) source.play(request.line, request.episodeId, request.offerDriveSignIn)
+                else source.play(request.line, request.episodeId)
+            }
+        } catch (required: SpiderSource.DriveSignInRequired) {
+            return PlayInfo(kind = "drive_sign_in", driveSignIn = required.prompt)
+        }
         return try {
             withExtras(streamCached(playerHeaders(playResolver.resolve(raw, a.config)), request, a.config), raw, request)
         } catch (e: PlayResolveException) {
@@ -631,6 +640,10 @@ class Engine(
         } catch (e: Exception) {
             throw EngineException.SiteFailed(describe(e))
         }
+    }
+
+    suspend fun pollDriveSignIn(request: DriveSignInPoll): DriveSignInStatus = siteCall(request.site) { source ->
+        (source as? SpiderSource)?.pollDriveSignIn(request.handle) ?: DriveSignInStatus("expired")
     }
 
     /**
@@ -753,6 +766,8 @@ class Engine(
         return try {
             withTimeout(source.timeoutMs + 2_000) { block(source) }
         } catch (e: EngineException) {
+            throw e
+        } catch (e: SpiderSource.DriveSignInRequired) {
             throw e
         } catch (e: UnsupportedSiteException) {
             throw EngineException.Unsupported(e.message ?: "unsupported site")

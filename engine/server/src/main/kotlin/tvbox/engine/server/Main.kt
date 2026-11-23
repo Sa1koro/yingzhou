@@ -73,6 +73,24 @@ fun main(args: Array<String>) {
     val check = "--check" in args
     /** The kinds a check is limited to (`--only`); null when everything runs. */
     val checkOnly = if (check) argValue(args, "--only")?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() }?.toSet() else null
+    val requireSites = if (check && ("--require-sites" in args || "--require-sites-file" in args)) {
+        val inlineKeys = argValue(args, "--require-sites")?.takeUnless { it.startsWith("--") }.orEmpty()
+        val fileKeys = if ("--require-sites-file" in args) {
+            val path = argValue(args, "--require-sites-file")?.takeUnless { it.startsWith("--") }
+            val content = path?.let { runCatching { File(it).readText() }.getOrNull() }
+            if (content == null) {
+                System.err.println("--require-sites-file needs a readable UTF-8 file")
+                return Runtime.getRuntime().halt(2)
+            }
+            content.removePrefix("\uFEFF")
+        } else ""
+        val keys = (inlineKeys.split(',') + fileKeys.lines()).map(String::trim).filter(String::isNotEmpty).toSet()
+        if (keys.isEmpty()) {
+            System.err.println("--require-sites or --require-sites-file needs at least one site key")
+            Runtime.getRuntime().halt(2)
+        }
+        keys
+    } else emptySet()
     val port = argValue(args, "--port")?.toIntOrNull() ?: if (check) freePort() else 9978
     val host = if ("--lan" in args) "0.0.0.0" else "127.0.0.1"
     val local = "http://127.0.0.1:$port"
@@ -134,7 +152,9 @@ fun main(args: Array<String>) {
         onProcess = { p, started -> if (started) ChildProcesses.register(p) else ChildProcesses.kill(p) },
     )
     // Web page sniffing in a headless Edge/Chrome, when one is installed.
-    val sniffer = CdpSniffer.findBrowser()?.let { CdpSniffer(it, File(work, "sniff-profile"), client, network = network, networkProxy = networkProxy) }
+    val sniffer = if (check && "--no-sniff" in args) null else CdpSniffer.findBrowser()?.let {
+        CdpSniffer(it, File(work, "sniff-profile"), client, network = network, networkProxy = networkProxy)
+    }
     // The HLS streams players are served, kept on disk; an engine without a data folder (--demo) starts with none.
     val streamDir = File(work, "cache/stream").also { if (dataDir == null) it.deleteRecursively() }
     val streamCache = tvbox.engine.core.cache.StreamCache(client, tvbox.engine.core.cache.StreamStore(streamDir), log = { System.err.println(it) })
@@ -200,10 +220,23 @@ fun main(args: Array<String>) {
     val lan = if (check) null else tvbox.engine.server.lan.LanSharing(
         access, port, argValue(args, "--name") ?: tvbox.engine.server.lan.LanSharing.defaultName(), boundToAll = "--lan" in args, module = serverModule,
     ).also { it.start() }
-    println(if (sniffer != null) "sniffing with " + CdpSniffer.findBrowser() else "sniffing unavailable: no Edge/Chrome/Chromium found (set TVBOX_BROWSER)")
+    println(when {
+        sniffer != null -> "sniffing with " + CdpSniffer.findBrowser()
+        check && "--no-sniff" in args -> "browser sniffing disabled for this check"
+        else -> "sniffing unavailable: no Edge/Chrome/Chromium found (set TVBOX_BROWSER)"
+    })
 
     if (check) {
-        val given = checkInputs(args)
+        val fileInputs = if ("--check-inputs-file" in args) {
+            val path = argValue(args, "--check-inputs-file")?.takeUnless { it.startsWith("--") }
+            val content = path?.let { runCatching { File(it).readText() }.getOrNull() }
+            if (content == null) {
+                System.err.println("--check-inputs-file needs a readable UTF-8 file")
+                return Runtime.getRuntime().halt(2)
+            }
+            content.removePrefix("\uFEFF").lineSequence().map(String::trim).filter { it.isNotEmpty() && !it.startsWith('#') }.toList()
+        } else emptyList()
+        val given = checkInputs(args, fileInputs)
         val inputs = given.ifEmpty { listOfNotNull(demo?.let { "$local/demo/config.json" }) }
         if (inputs.isEmpty()) {
             System.err.println("--check needs a subscription address, a config file or a folder of config files")
@@ -211,26 +244,33 @@ fun main(args: Array<String>) {
         }
         val options = Checker.Options(
             only = checkOnly ?: Checker.Options().only,
-            play = "--play" in args,
+            play = "--play" in args || "--probe-media" in args,
             maxSites = argValue(args, "--max-sites")?.toIntOrNull() ?: 0,
             maxConfigs = argValue(args, "--max-configs")?.toIntOrNull() ?: Checker.Options().maxConfigs,
             // The self-test leaves out the demo site that is dead on purpose.
             skip = if (given.isEmpty()) DemoSite.SELF_CHECK_SKIP else emptyMap(),
+            siteKeys = requireSites,
+            mediaClient = playbackClient.takeIf { "--probe-media" in args },
+            checkMirrors = "--all-sources" in args,
         )
         val header = listOf(
             "引擎：${engine.info.name} ${engine.info.version}（${engine.info.platform}），Java ${System.getProperty("java.version")}",
             "范围：${options.only.joinToString(", ")}" + (if (options.play) "，含播放解析" else "") +
+                (if (options.mediaClient != null) "，含 HTTP 媒体读取" else "") +
                 (if (options.maxSites > 0) "，每个配置最多 ${options.maxSites} 个站点" else ""),
         )
         val report = argValue(args, "--report")?.let { File(it).absoluteFile }
+        val redactReport = "--redacted-report" in args
         report?.parentFile?.mkdirs()
         // Written after every config: a run that is stopped half way still leaves its report.
         fun write(results: List<Checker.ConfigCheck>) {
             report ?: return
-            report.writeText(Checker.markdown(results, header))
-            File(report.path.substringBeforeLast('.') + ".json").writeText(Checker.json(results).toString())
+            val reportResults = if (redactReport) CheckReportPrivacy.summarize(results) else results
+            report.writeText(Checker.markdown(reportResults, header))
+            File(report.path.substringBeforeLast('.') + ".json").writeText(Checker.json(reportResults).toString())
         }
-        val results = runBlocking { Checker(engine, options, ::println).run(inputs, ::write) }
+        val logCheck: (String) -> Unit = if (redactReport) { _ -> } else ::println
+        val results = runBlocking { Checker(engine, options, logCheck).run(inputs, ::write) }
         report?.let { println("报告：${it.path}") }
         val sites = results.flatMap { it.sites }.filter { it.verdict != "skipped" }
         println(
@@ -238,8 +278,13 @@ fun main(args: Array<String>) {
                 "引擎兼容 ${sites.count { it.cause == "compat" }}，不支持 ${sites.count { it.cause == "unsupported" }}，" +
                 "网络 ${sites.count { it.cause == "network" }}，站点报错 ${sites.count { it.cause == "site" }}",
         )
+        val unverified = Checker.unverifiedSites(results, requireSites, requirePlay = options.play)
+        if (unverified.isNotEmpty()) {
+            val labels = if (redactReport) unverified.map { CheckReportPrivacy.label("site", it) } else unverified
+            System.err.println("目标站点未通过验收：${labels.joinToString()}")
+        }
         ChildProcesses.killAll()
-        Runtime.getRuntime().halt(if (Checker.ok(results, strict = "--strict" in args)) 0 else 1)
+        Runtime.getRuntime().halt(if (unverified.isEmpty() && Checker.ok(results, strict = "--strict" in args || requireSites.isNotEmpty())) 0 else 1)
     }
 
     val subscribe = argValue(args, "--subscribe")?.let(::localInput) ?: demo?.let { "$local/demo/config.json" }
@@ -278,8 +323,8 @@ private fun freePort(): Int {
 private fun localInput(input: String): String = File(input).takeIf { it.isFile }?.absolutePath ?: input
 
 /** The arguments after --check up to the next option; a folder stands for the config files in it. */
-private fun checkInputs(args: Array<String>): List<String> =
-    args.drop(args.indexOf("--check") + 1).takeWhile { !it.startsWith("--") }.flatMap { input ->
+private fun checkInputs(args: Array<String>, fileInputs: List<String>): List<String> =
+    (args.drop(args.indexOf("--check") + 1).takeWhile { !it.startsWith("--") } + fileInputs).flatMap { input ->
         val file = File(input)
         when {
             file.isDirectory -> file.listFiles { f -> f.isFile && f.name.endsWith(".json") }.orEmpty().sortedBy { it.name }

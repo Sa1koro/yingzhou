@@ -43,7 +43,7 @@ abstract class JarSpiderRuntime(
 ) : SpiderRuntime, JarParsers {
     override val kind = "jar"
 
-    private class LoadedJar(val loader: ClassLoader, val context: Context, val proxy: Method?, val initCause: String?)
+    private class LoadedJar(val loader: ClassLoader, val context: Context, val proxy: Method?, val initFailure: SpiderDiagnostic?)
     private class Selection(val global: String, val referenced: Set<String>)
 
     private val loaded = ConcurrentHashMap<String, LoadedJar>()
@@ -58,6 +58,8 @@ abstract class JarSpiderRuntime(
     protected abstract fun classLoader(jar: File): ClassLoader
 
     protected open fun contextFor(loader: ClassLoader, archive: File): Context = context
+
+    protected open fun supportsOwnDriveSignIn(loader: ClassLoader): Boolean = false
 
     protected open val retireUnusedLoaders = false
     protected open fun releaseLoader(loader: ClassLoader) {}
@@ -95,7 +97,7 @@ abstract class JarSpiderRuntime(
             throw SpiderLoadException(diagnostic.summary(), diagnostic = diagnostic)
         }
         val jar = load(selected, spec, site.key, archive)
-        fun diagnose(stage: String, error: Throwable) = spiderDiagnostic(site.key, stage, error, archive, jar.initCause)
+        fun diagnose(stage: String, error: Throwable) = spiderDiagnostic(site.key, stage, error, archive, jar.initFailure)
         val className = "com.github.catvod.spider." + if (site.api.contains("csp_")) site.api.substringAfter("csp_") else site.api
         val spider = try {
             jar.loader.loadClass(className).getDeclaredConstructor().newInstance() as CatSpider
@@ -119,7 +121,8 @@ abstract class JarSpiderRuntime(
                 recent = jar
             }
         }
-        CatSpiderAdapter(spider, ::diagnose, onUse = { synchronized(selectionLock) { if (selected === selection) recent = jar } })
+        val signInProxy = if (supportsOwnDriveSignIn(jar.loader)) jar.proxy else null
+        CatSpiderAdapter(spider, ::diagnose, signInProxy, onUse = { synchronized(selectionLock) { if (selected === selection) recent = jar } })
     }
 
     private suspend fun load(selected: Selection, spec: String, site: String = "", archive: String? = spiderArchiveId(spec)): LoadedJar {
@@ -143,8 +146,8 @@ abstract class JarSpiderRuntime(
                     } catch (e: Throwable) {
                         throw failure(spiderDiagnostic(site, "jar.load", e, archive), e)
                     }
-                    val initCause = initJar(loader, pluginContext, site, archive)
-                    val result = LoadedJar(loader, pluginContext, proxyMethod(loader), initCause)
+                    val initFailure = initJar(loader, pluginContext, site, archive)
+                    val result = LoadedJar(loader, pluginContext, proxyMethod(loader), initFailure)
                     synchronized(selectionLock) {
                         if (retireUnusedLoaders && selected !== selection && spec !in selection.referenced) {
                             throw CancellationException("subscription changed while loading the spider jar")
@@ -161,21 +164,21 @@ abstract class JarSpiderRuntime(
     }
 
     /** `Init.init(Context)`, and tell the jar's own copy of com.github.catvod.Proxy (if any) where the engine is. */
-    private fun initJar(loader: ClassLoader, pluginContext: Context, site: String, archive: String?): String? {
+    private fun initJar(loader: ClassLoader, pluginContext: Context, site: String, archive: String?): SpiderDiagnostic? {
         val className = "com.github.catvod.spider.Init"
-        val initCause = try {
+        val initFailure = try {
             loader.loadClass(className).getMethod("init", Context::class.java).invoke(null, pluginContext)
             null
         } catch (e: Throwable) {
             if (e is ClassNotFoundException && e.isAbsent(className)) null else {
                 val diagnostic = spiderDiagnostic(site, "jar.init", e, archive)
                 System.err.println(diagnostic.summary())
-                diagnostic.cause
+                diagnostic
             }
         }
         com.github.catvod.Proxy.set(port())
         runCatching { loader.loadClass("com.github.catvod.Proxy").getMethod("set", Int::class.javaPrimitiveType).invoke(null, port()) }
-        return initCause
+        return initFailure
     }
 
     private fun proxyMethod(loader: ClassLoader): Method? =
@@ -238,6 +241,7 @@ private fun failure(diagnostic: SpiderDiagnostic, error: Throwable, fallbackCode
 private class CatSpiderAdapter(
     private val spider: CatSpider,
     private val diagnose: (String, Throwable) -> SpiderDiagnostic,
+    private val signInProxy: Method?,
     private val onUse: () -> Unit,
 ) : Spider {
     override fun diagnostic(site: String, stage: String, error: Throwable): SpiderDiagnostic = diagnose(stage, error)
@@ -269,6 +273,14 @@ private class CatSpiderAdapter(
 
     override suspend fun proxy(params: Map<String, String>): ProxyResponse? =
         io("spider.proxy") { spider.proxy(HashMap(params)) }?.let { toProxyResponse(it) }
+
+    override val supportsDriveSignIn: Boolean get() = signInProxy != null
+
+    override suspend fun driveSignIn(params: Map<String, String>): ProxyResponse? = io("spider.login") {
+        @Suppress("UNCHECKED_CAST")
+        val result = signInProxy?.invoke(null, HashMap(params)) as? Array<Any?>
+        result?.let(::toProxyResponse)
+    }
 
     override fun destroy() {
         runCatching { spider.destroy() }

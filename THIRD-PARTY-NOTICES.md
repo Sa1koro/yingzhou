@@ -2,6 +2,10 @@
 
 Yingzhou (映舟) is licensed under AGPL-3.0 (see `LICENSE`). It includes code adapted from the projects below.
 
+## 映匣 / tvbox-silicon — GPL-3.0
+
+- The desktop Wex sign-in protocol and Java stream proxy setting follow `Runtime/JavaHost` at revision `1f29cadb6576e7dc7f102da7479c25887609f948`, particularly `OwnDriveSignIn`, `CloudDriveBridge`, and `PluginSession`. The nested DEX delegation policy follows `dalvik.system.DexClassLoader`. Yingzhou implements these behaviors through its own runtime and client interfaces.
+
 ## TVBoxOS — AGPL-3.0
 
 - `engine/jar-host/java/com/github/catvod/**`: the host API jar spiders link against (Spider, SpiderApi, OkHttp, Proxy, ...).

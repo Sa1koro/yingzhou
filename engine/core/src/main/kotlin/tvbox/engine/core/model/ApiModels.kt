@@ -159,6 +159,8 @@ data class SpiderDiagnostic(
     val cause: String,
     val archive: String? = null,
     val initCause: String? = null,
+    val nativeOperation: String? = null,
+    val initNativeOperation: String? = null,
 )
 
 @Serializable

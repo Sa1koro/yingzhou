@@ -66,4 +66,37 @@ class CheckCauseTest {
         assertTrue("| jar.fetch | 1 | 0 |" in report)
         assertTrue("| spider.recommend | 0 | 1 |" in report)
     }
+
+    @Test
+    fun `required sites must be present and pass playback resolution`() {
+        val passed = Checker.SiteCheck("target", "target", "jar", "pass", play = "direct")
+        val checked = Checker.ConfigCheck("one", "one", "one", sites = listOf(passed))
+        assertEquals(emptyList<String>(), Checker.unverifiedSites(listOf(checked), setOf("target"), requirePlay = true))
+        assertEquals(listOf("missing"), Checker.unverifiedSites(listOf(checked), setOf("target", "missing"), requirePlay = true))
+        for (verdict in listOf("skipped", "empty", "fail", "pass")) {
+            val incomplete = checked.copy(sites = listOf(passed.copy(verdict = verdict, play = "")))
+            assertEquals(listOf("target"), Checker.unverifiedSites(listOf(checked, incomplete), setOf("target"), requirePlay = true))
+        }
+        val withoutPlay = checked.copy(sites = listOf(passed.copy(play = "")))
+        assertEquals(emptyList<String>(), Checker.unverifiedSites(listOf(withoutPlay), setOf("target"), requirePlay = false))
+    }
+
+    @Test
+    fun `shareable reports keep JNI symbols and remove locator and upstream error text`() {
+        val marker = "private-value-in-this-test"
+        val address = "https://fixture.test/config?key=$marker"
+        val operation = "JNI callback java/io/File->exists()Z"
+        val diag = SpiderDiagnostic(
+            "spider.create", marker, "native", "UnsatisfiedLinkError: Android JNI: guest unavailable", "64ec3885f822",
+            "IOException: $address", initNativeOperation = operation,
+        )
+        val site = Checker.SiteCheck(marker, marker, "jar", "fail", "compat", "home", "SPIDER_LOAD_FAILED: $address", diagnostic = diag)
+        val report = CheckReportPrivacy.summarize(listOf(Checker.ConfigCheck(address, marker, address, sites = listOf(site))))
+        val json = Checker.json(report).toString()
+        val markdown = Checker.markdown(report, emptyList())
+        assertTrue(marker !in json && marker !in markdown)
+        assertTrue("fixture.test" !in json && "fixture.test" !in markdown)
+        assertTrue(operation in json)
+        assertTrue("SPIDER_LOAD_FAILED" in json && "SPIDER_LOAD_FAILED" in markdown)
+    }
 }

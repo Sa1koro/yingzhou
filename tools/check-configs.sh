@@ -38,9 +38,14 @@ esac
 args=(--check "$@" --report "$report")
 [ -n "${ONLY:-}" ] && args+=(--only "$ONLY")
 [ -n "${PLAY:-}" ] && args+=(--play)
+[ -n "${PROBE_MEDIA:-}" ] && args+=(--probe-media)
+[ -n "${ALL_SOURCES:-}" ] && args+=(--all-sources)
+[ -n "${REDACTED_REPORT:-}" ] && args+=(--redacted-report)
+[ -n "${NO_SNIFF:-}" ] && args+=(--no-sniff)
 [ -n "${MAX_SITES:-}" ] && args+=(--max-sites "$MAX_SITES")
 [ -n "${MAX_CONFIGS:-}" ] && args+=(--max-configs "$MAX_CONFIGS")
 [ -n "${STRICT:-}" ] && args+=(--strict)
+[ -n "${REQUIRE_SITES:-}" ] && args+=(--require-sites "$REQUIRE_SITES")
 
 echo "== check (java: $java)"
 exec "$java" -Xss1m -XX:+UnlockDiagnosticVMOptions -XX:-BytecodeVerificationRemote \

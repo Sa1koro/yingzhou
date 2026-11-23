@@ -31,13 +31,16 @@ import java.util.concurrent.TimeUnit
 class JarDiagnosticsTest {
     object BrokenInit {
         @JvmStatic fun init(context: Context) {
-            throw UnsatisfiedLinkError("${context.javaClass.name}: /private/path?token=private-value")
+            throw UnsatisfiedLinkError("Android JNI: JNI_OnLoad failed").initCause(IllegalStateException("${context.javaClass.name}: /private/path?token=private-value"))
         }
     }
 
     class WorkingSpider : Spider()
     class BrokenSpider : Spider() {
         init { throw NoSuchFieldError("Class com.github.catvod.spider.Init does not have member field 'int number'") }
+    }
+    class OpaqueSpider : Spider() {
+        init { throw ExceptionInInitializerError() }
     }
 
     @Test
@@ -51,6 +54,7 @@ class JarDiagnosticsTest {
                     "com.github.catvod.spider.Init" -> BrokenInit::class.java.also { initLookups++ }
                     "com.github.catvod.spider.Working" -> WorkingSpider::class.java
                     "com.github.catvod.spider.Broken" -> BrokenSpider::class.java
+                    "com.github.catvod.spider.Opaque" -> OpaqueSpider::class.java
                     "com.github.catvod.spider.Dependent" -> throw ClassNotFoundException("android.webkit.WebView")
                     "com.github.catvod.spider.Wrapped" -> throw ClassNotFoundException(name, ClassNotFoundException("android.webkit.WebView"))
                     else -> super.loadClass(name)
@@ -76,8 +80,14 @@ class JarDiagnosticsTest {
             assertEquals("missing_member", detail.kind)
             assertEquals("NoSuchFieldError: com.github.catvod.spider.Init.number", detail.cause)
             assertEquals(spiderArchiveId(address), detail.archive)
-            assertEquals("UnsatisfiedLinkError", detail.initCause)
+            assertEquals("UnsatisfiedLinkError: Android JNI: JNI_OnLoad failed", detail.initCause)
             assertFalse(failure.message.orEmpty().contains("private"))
+            val opaque = assertThrows(SpiderLoadException::class.java) {
+                runBlocking { runtime.create(SiteBean("opaque", "opaque", 3, "csp_Opaque"), "") }
+            }.diagnostic
+            assertEquals("native", opaque?.kind)
+            assertEquals("ExceptionInInitializerError", opaque?.cause)
+            assertEquals(detail.initCause, opaque?.initCause)
             for ((api, expectedKind) in mapOf("Absent" to "missing_spider", "Dependent" to "missing_class", "Wrapped" to "missing_class")) {
                 val missing = assertThrows(SpiderLoadException::class.java) {
                     runBlocking { runtime.create(SiteBean(api, api, 3, "csp_$api"), "") }

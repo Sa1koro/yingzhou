@@ -10,6 +10,7 @@ import tvbox.engine.jarhost.HostBridge
 import tvbox.engine.jarhost.JarSpiderRuntime
 import java.io.File
 import java.net.URLClassLoader
+import java.util.jar.JarFile
 
 /**
  * Jar spiders on a desktop/NAS JVM. The spider jar's dex is converted to class files ([DexConverter]) and loaded
@@ -24,7 +25,7 @@ class DesktopJarRuntime(
     jars: JarRepository,
     port: () -> Int,
     cacheDir: File,
-    log: (String) -> Unit = { System.err.println(it) },
+    private val log: (String) -> Unit = { System.err.println(it) },
 ) : JarSpiderRuntime(desktopApplication(dataDir, port), jars, port) {
     private val converter = DexConverter(cacheDir, log)
 
@@ -41,12 +42,33 @@ class DesktopJarRuntime(
         if (loader is AndroidJniLoader) java.util.concurrent.CompletableFuture.runAsync { loader.close() }
     }
 
+    override fun supportsOwnDriveSignIn(loader: ClassLoader): Boolean = isWexArchive(convertedArchive(loader))
+
     override fun contextFor(loader: ClassLoader, archive: File): Context {
-        val converted = File((loader as URLClassLoader).urLs.single().toURI())
-        return Application(loader, Resources(AssetManager(converted)))
+        val converted = convertedArchive(loader)
+        val context = Application(loader, Resources(AssetManager(converted)))
+        if (isWexArchive(converted)) {
+            val preferences = context.getSharedPreferences("NewWexFnw_preferences", Context.MODE_PRIVATE)
+            if (preferences.getString("pan.thread_proxy_mode", "") != "java" &&
+                !preferences.edit().putString("pan.thread_proxy_mode", "java").commit()) {
+                log("jar.proxy: Wex Java proxy mode could not be saved")
+            }
+        }
+        return context
     }
 
     private companion object {
+        fun convertedArchive(loader: ClassLoader): File = File((loader as URLClassLoader).urLs.single().toURI())
+        fun isWexArchive(converted: File): Boolean = JarFile(converted).use { jar ->
+            jar.entries().asSequence().any { entry ->
+                val prefix = "com/github/catvod/spider/"
+                if (!entry.name.startsWith(prefix)) return@any false
+                val name = entry.name.removePrefix(prefix)
+                name == "AiNewWoggGuard.class" || name == "AiNewHuaJuanGuard.class" ||
+                    (name.startsWith("Wex") && name.endsWith("Guard.class") && '/' !in name)
+            }
+        }
+
         fun desktopApplication(dataDir: File, port: () -> Int): Context {
             Context.setBaseDir(dataDir.also { it.mkdirs() })
             val app = Application()

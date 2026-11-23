@@ -81,7 +81,22 @@ void main() {
     expect(issue('config.parse', 'invalid_result', 'InvalidConfigException: subscription returned a web page').summary, '解析订阅配置 · 订阅地址返回了网页');
     expect(issue('spider.create', 'missing_spider', 'ClassNotFoundException: com.github.catvod.spider.X').kindLabel, '配置指定的蜘蛛类缺失');
     expect(issue('spider.init', 'native', 'UnsatisfiedLinkError: Android JNI: guest timed out').report, contains('Android JNI: guest timed out'));
+    expect(issue('spider.create', 'native', 'UnsatisfiedLinkError: Android JNI: native method not bound').kindLabel, '找不到该 JNI 方法的绑定');
     expect(issue('spider.init', 'native', 'UnsatisfiedLinkError: Android JNI: guest timed out at secret').report, isNot(contains('secret')));
+  });
+
+  test('an initializer wrapper keeps the site exception and explains the recorded native phase', () {
+    SourceDiagnostic issue(String cause, String initCause) =>
+        SourceDiagnostic.tryParse({'site': 'DouBan', 'stage': 'spider.create', 'kind': 'native', 'cause': cause, 'initCause': initCause})!;
+    const wrapper = 'ExceptionInInitializerError';
+    const missing = 'UnsatisfiedLinkError: Android JNI: native dependency missing';
+    final recorded = issue(wrapper, missing);
+    expect(recorded.summary, '创建站点蜘蛛 · 共享蜘蛛包：缺少原生库依赖');
+    expect(recorded.details['站点异常'], wrapper);
+    expect(recorded.details['共享包首次初始化'], missing);
+    expect(issue('UnsatisfiedLinkError: Android JNI: JNI_OnLoad failed', missing).kindLabel, '原生库在 JNI_OnLoad 初始化时失败');
+    expect(issue(wrapper, '$missing https://example.invalid/?secret').report, isNot(contains('secret')));
+    expect(issue(wrapper, '$missing extra text').kindLabel, '原生库调用失败');
   });
 
   test('home warnings, HTTP errors and streamed search use the same source report', () async {
@@ -118,6 +133,24 @@ void main() {
     expect(log.entries.map((entry) => entry.level), [DevLevel.warn, DevLevel.error, DevLevel.error]);
     expect(log.recentSourceIssues.first, contains('spider.search'));
     expect(log.recentSourceIssues.last, contains('123456789abc'));
+  });
+
+  test('developer source log keeps the first JNI callback and rejects raw messages', () {
+    const signature = 'JNI callback android/app/Application->getCodeCacheDir()Ljava/io/File;';
+    final issue = SourceDiagnostic.tryParse({
+      ..._issue,
+      'stage': 'spider.create',
+      'kind': 'native',
+      'cause': 'UnsatisfiedLinkError: Android JNI: guest unavailable',
+      'initCause': 'UnsatisfiedLinkError: Android JNI: unsupported Java callback',
+      'nativeOperation': '$signature /private/data?token=secret',
+      'initNativeOperation': signature,
+    })!;
+    final log = DevLog()..sourceIssue(issue, warning: false);
+    expect(issue.kindLabel, '共享蜘蛛包：Android 原生代码需要的 Java 回调尚不支持');
+    expect(issue.details['共享包首次失败的 JNI 调用'], signature);
+    expect(log.recentSourceIssues.single, contains(signature));
+    expect(issue.report, isNot(contains('secret')));
   });
 
   test('a legacy empty home and unrecognized diagnostics do not produce a fault', () async {

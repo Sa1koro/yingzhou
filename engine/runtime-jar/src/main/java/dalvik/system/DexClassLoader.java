@@ -20,6 +20,8 @@ import java.io.File;
  */
 public class DexClassLoader extends BaseDexClassLoader {
 
+    static { registerAsParallelCapable(); }
+
     public DexClassLoader(String dexPath, String optimizedDirectory,
                           String librarySearchPath, ClassLoader parent) {
         super(dexPath, optimizedDirectory, librarySearchPath, parent);
@@ -28,5 +30,25 @@ public class DexClassLoader extends BaseDexClassLoader {
     public DexClassLoader(String dexPath, File optimizedDirectory,
                           String librarySearchPath, ClassLoader parent) {
         super(dexPath, optimizedDirectory, librarySearchPath, parent);
+    }
+
+    @Override
+    protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+        if (!name.startsWith("com.github.catvod.") || name.startsWith("com.github.catvod.crawler.")) {
+            return super.loadClass(name, resolve);
+        }
+        synchronized (getClassLoadingLock(name)) {
+            Class<?> loaded = findLoadedClass(name);
+            if (loaded == null) {
+                try {
+                    loaded = findDexClass(name);
+                } catch (ClassNotFoundException missing) {
+                    if (missing.getCause() != null) throw missing;
+                    return super.loadClass(name, resolve);
+                }
+            }
+            if (resolve) resolveClass(loaded);
+            return loaded;
+        }
     }
 }

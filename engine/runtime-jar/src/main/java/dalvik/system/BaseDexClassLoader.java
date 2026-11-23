@@ -16,10 +16,12 @@ import java.util.zip.ZipEntry;
 /**
  * Desktop stand-in for Android's dex class loaders. Spiders (and shells) that download extra dex files and load
  * them with {@code new DexClassLoader(...)} get the files converted to class files by the engine's dex converter
- * ({@link #converter}), then loaded parent-first like on Android. Classes are defined by this loader, so
+ * ({@link #converter}). Classes are defined by this loader, so
  * {@code getClass().getClassLoader()} is the loader the spider created.
  */
 public class BaseDexClassLoader extends ClassLoader {
+
+    static { registerAsParallelCapable(); }
 
     /** Installed by the desktop jar runtime: turns a dex file or dex jar into a jar of class files. */
     public interface Converter {
@@ -80,8 +82,7 @@ public class BaseDexClassLoader extends ClassLoader {
         return joined;
     }
 
-    @Override
-    protected Class<?> findClass(String name) throws ClassNotFoundException {
+    protected final Class<?> findDexClass(String name) throws ClassNotFoundException {
         String entry = name.replace('.', '/') + ".class";
         for (JarFile jar : jars) {
             ZipEntry e = jar.getEntry(entry);
@@ -94,6 +95,11 @@ public class BaseDexClassLoader extends ClassLoader {
             }
         }
         throw new ClassNotFoundException(name + " (dex path: " + dexPath + ")");
+    }
+
+    @Override
+    protected Class<?> findClass(String name) throws ClassNotFoundException {
+        return findDexClass(name);
     }
 
     @Override

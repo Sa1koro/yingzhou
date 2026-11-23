@@ -1,9 +1,15 @@
 package tvbox.engine.jar
 
+import org.objectweb.asm.ClassReader
+import tvbox.engine.core.spider.SpiderNativeOperation
 import java.io.File
+import java.io.IOException
 import java.net.URLClassLoader
+import java.nio.file.AccessDeniedException
 import java.nio.file.Files
+import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
+import java.nio.file.attribute.BasicFileAttributes
 import java.security.CodeSource
 import java.security.MessageDigest
 import java.util.concurrent.CancellationException
@@ -20,9 +26,14 @@ class AndroidJniLoader private constructor(
         val name = entry.substringAfterLast('/')
     }
 
-    private var guest: AndroidJniGuest? = null
+    private class GuestSlot(val runtime: AndroidJniGuest, var synchronizedLibraries: Int = 0)
+
+    private val guests = mutableListOf<GuestSlot>()
+    private val registeredLibraries = linkedMapOf<String, Library>()
+    private var depth = 0
     private var guestRoot: Path? = null
     private var guestAbi: Boolean? = null
+    private var loadFailure: UnsatisfiedLinkError? = null
     private var closed = false
     private val extracted = mutableMapOf<Library, ByteArray>()
     private val entries = JarFile(archive, true, ZipFile.OPEN_READ, JarFile.runtimeVersion())
@@ -53,49 +64,127 @@ class AndroidJniLoader private constructor(
         }
     }
 
+    private fun asset(name: String): ByteArray? {
+        if (name.length !in 1..512 || '\\' in name || '\u0000' in name || name.split('/').any { it.isEmpty() || it == "." || it == ".." }) return null
+        val entry = entries.getJarEntry("assets/$name") ?: return null
+        if (entry.isDirectory || entry.size !in 0..maxLibrary) return null
+        return entries.getInputStream(entry).use { it.readNBytes(entry.size.toInt() + 1) }.takeIf { it.size.toLong() == entry.size }
+    }
+
+    private fun classHierarchy(name: String): GuestClassHierarchy? {
+        val entry = entries.getJarEntry("$name.class") ?: return null
+        if (entry.size !in 1..maxLibrary) return null
+        val metadata = entries.getInputStream(entry).use { ClassReader(it.readNBytes(entry.size.toInt() + 1)) }
+        return GuestClassHierarchy(metadata.superName, metadata.interfaces.asList())
+    }
+
+    private fun archiveClass(name: String): Class<*>? {
+        if (entries.getJarEntry("$name.class") == null) return null
+        val resolved = loadClass(name.replace('/', '.'))
+        return resolved.takeIf { it.classLoader === this }
+    }
+
     private fun selectPath(path: String): Library {
-        val file = File(path)
-        if (!file.isAbsolute || !file.isFile || !file.toPath().toRealPath().startsWith(dataDir.toPath().toRealPath())) fail("library is outside spider storage")
-        val candidates = libraries.filter { it.size == file.length() }
+        val candidate = File(path).toPath()
+        if (!candidate.isAbsolute || !Files.isRegularFile(candidate)) fail("library is outside spider storage")
+        val root = dataDir.toPath().toAbsolutePath().normalize()
+        val realPath = try {
+            candidate.toRealPath().also { if (!it.startsWith(root.toRealPath())) fail("library is outside spider storage") }
+        } catch (denied: AccessDeniedException) {
+            unlinkedStoragePath(root, candidate) ?: throw denied
+        }
+        val candidates = libraries.filter { it.size == Files.size(realPath) }
         if (candidates.isEmpty()) fail("library is not packaged in this spider")
         val digest = MessageDigest.getInstance("SHA-256")
-        val fingerprint = file.inputStream().use { digest.digest(it.readNBytes(candidates.first().size.toInt() + 1)) }
+        val fingerprint = Files.newInputStream(realPath, NOFOLLOW_LINKS).use { digest.digest(it.readNBytes(candidates.first().size.toInt() + 1)) }
         return candidates.firstOrNull { fingerprint.contentEquals(extracted.getOrPut(it) { digest.digest(bytes(it)) }) }
             ?: fail("library differs from the packaged copy")
     }
 
     @Synchronized private fun loadGuest(value: String, byName: Boolean) {
+        val method = if (byName) "loadLibrary" else "load"
+        try {
+            withGuestError("guest initialization failed", "JNI method java/lang/System->$method(Ljava/lang/String;)V") {
+                registerLibrary(value, byName)
+            }
+            if (depth == 0) loadFailure = null
+        } catch (error: UnsatisfiedLinkError) {
+            if (loadFailure == null) loadFailure = error
+            throw error
+        }
+    }
+
+    private fun registerLibrary(value: String, byName: Boolean) {
         if (closed) fail("archive is closed")
         val library = if (byName) {
             val candidates = libraries.filter { it.name == "lib$value.so" }
             candidates.firstOrNull { it.arm64 == arm64() } ?: candidates.firstOrNull() ?: fail("library is not packaged in this spider")
-        } else selectPath(value)
-        if (guestAbi != null && library.arm64 != guestAbi) fail("cannot mix armeabi-v7a and arm64-v8a in one guest")
-        val runtime = guest ?: withGuestError("guest initialization failed") {
-            val root = Files.createTempDirectory("yingzhou-jni-")
-            try {
-                AndroidJniGuest(library.arm64, root.toFile()).also { guestRoot = root }
-            } catch (error: Throwable) {
-                try { Files.deleteIfExists(root) } catch (cleanup: Exception) { error.addSuppressed(cleanup) }
-                throw error
-            }
-        }.also {
-            guestAbi = library.arm64
-            guest = it
+        } else try {
+            selectPath(value)
+        } catch (error: IOException) {
+            throw NativeLoadFailure("library path inaccessible", "Cannot access the Android JNI library path", error)
         }
-        withGuestError("guest initialization failed") { runtime.load(library.name, bytes(library)) }
+        if (guestAbi != null && library.arm64 != guestAbi) fail("cannot mix armeabi-v7a and arm64-v8a in one guest")
+        val previous = registeredLibraries[library.name]
+        if (previous != null && previous != library && !bytes(previous).contentEquals(bytes(library))) fail("conflicting packaged libraries")
+        if (guestAbi == null) guestAbi = library.arm64
+        registeredLibraries.putIfAbsent(library.name, library)
+        if (depth == 0) withRuntime {}
+    }
+
+    private fun <T> withRuntime(action: (AndroidJniGuest) -> T): T {
+        if (depth >= MAX_GUESTS) throw NativeLoadFailure("guest nesting limit", "Nested Android JNI call limit reached")
+        val abi = checkNotNull(guestAbi)
+        val slot = guests.getOrNull(depth) ?: run {
+            val root = guestRoot ?: Files.createTempDirectory("yingzhou-jni-").also { guestRoot = it }
+            val runtime = AndroidJniGuest(
+                abi, root.toFile(), ::asset, { entries.getJarEntry("$it.class") != null }, ::classHierarchy, ::archiveClass,
+                GuestStorage(dataDir.toPath()),
+            )
+            GuestSlot(runtime).also(guests::add)
+        }
+        depth++
+        try {
+            syncLibraries(slot)
+            val result = action(slot.runtime)
+            if (depth == 1) syncLibraries(slot)
+            return result
+        } finally {
+            depth--
+        }
+    }
+
+    private fun syncLibraries(slot: GuestSlot) {
+        while (slot.synchronizedLibraries < registeredLibraries.size) {
+            val library = registeredLibraries.values.elementAt(slot.synchronizedLibraries)
+            slot.runtime.load(library.name, bytes(library))
+            slot.synchronizedLibraries++
+        }
     }
 
     @Synchronized private fun call(owner: Class<*>, signature: String, receiver: Any?, args: Array<Any?>): Any? {
-        val runtime = guest ?: fail("guest unavailable")
-        return withGuestError("native call failed") { runtime.invoke(owner.name.replace('.', '/'), signature, receiver, args) }
+        if (closed || guestAbi == null) {
+            throw UnsatisfiedLinkError("Android JNI: guest unavailable").also { it.initCause(loadFailure) }
+        }
+        val name = owner.name.replace('.', '/')
+        return withGuestError("native call failed", "JNI method $name->$signature") {
+            withRuntime { it.invoke(name, signature, receiver, args) }
+        }
     }
 
     @Synchronized override fun close() {
         if (closed) return
         closed = true
-        try { guest?.close() } finally {
-            guest = null
+        try {
+            var failure: Exception? = null
+            for (slot in guests.asReversed()) {
+                try { slot.runtime.close() } catch (error: Exception) {
+                    failure?.addSuppressed(error) ?: run { failure = error }
+                }
+            }
+            failure?.let { throw it }
+        } finally {
+            guests.clear()
             try { guestRoot?.let { Files.deleteIfExists(it) } } finally {
                 try { entries.close() } finally { super.close() }
             }
@@ -104,7 +193,23 @@ class AndroidJniLoader private constructor(
 
     companion object {
         private const val maxLibrary = 32L * 1024 * 1024
+        private const val MAX_GUESTS = 4
         private val caller = StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE)
+
+        internal fun unlinkedStoragePath(root: Path, candidate: Path): Path? {
+            if (!root.isAbsolute || root != root.normalize() || candidate != candidate.normalize() || candidate == root || !candidate.startsWith(root)) return null
+            val rootAttributes = Files.readAttributes(root, BasicFileAttributes::class.java, NOFOLLOW_LINKS)
+            if (!rootAttributes.isDirectory || rootAttributes.isOther || rootAttributes.isSymbolicLink) return null
+            var current = root
+            for (part in root.relativize(candidate)) {
+                current = current.resolve(part)
+                val attributes = Files.readAttributes(current, BasicFileAttributes::class.java, NOFOLLOW_LINKS)
+                if (attributes.isOther || attributes.isSymbolicLink) return null
+                if (current == candidate) return candidate.takeIf { attributes.isRegularFile }
+                if (!attributes.isDirectory) return null
+            }
+            return null
+        }
 
         private fun inspect(zip: ZipFile, entry: ZipEntry): Library? {
             if (!entry.name.endsWith(".so") || entry.size !in 20L..maxLibrary) return null
@@ -128,17 +233,20 @@ class AndroidJniLoader private constructor(
         }
 
         private fun fail(message: String): Nothing = throw UnsatisfiedLinkError("Android JNI: $message")
-        private inline fun <T> withGuestError(operation: String, run: () -> T): T = try {
+        private inline fun <T> withGuestError(operation: String, symbol: String? = null, run: () -> T): T = try {
             run()
         } catch (error: Throwable) {
             if (error is VirtualMachineError || error is ThreadDeath || error is CancellationException || error is InterruptedException) throw error
             val reason = when {
+                error is NativeLoadFailure -> error.reason
+                error is UnsatisfiedLinkError && error.message.orEmpty().startsWith("Android JNI: ") -> error.message!!.removePrefix("Android JNI: ")
                 error.message == "Android JNI guest timed out" -> "guest timed out"
                 error.message == "Android JNI guest unavailable" -> "guest unavailable"
                 error.message.orEmpty().startsWith("Unsupported Android JNI ") -> "unsupported signature"
                 else -> operation
             }
-            throw UnsatisfiedLinkError("Android JNI: $reason").also { it.initCause(error) }
+            val cause = if (symbol == null || reason == "guest unavailable") error else SpiderNativeOperation(symbol, error)
+            throw UnsatisfiedLinkError("Android JNI: $reason").also { it.initCause(cause) }
         }
         private fun loader(owner: Class<*>) = owner.classLoader as? AndroidJniLoader ?: fail("unknown spider archive")
         @JvmStatic fun callerIs64Bit(): Boolean = caller.walk { frames ->

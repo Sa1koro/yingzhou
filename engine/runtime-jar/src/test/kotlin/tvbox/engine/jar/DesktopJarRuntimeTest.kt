@@ -187,6 +187,82 @@ class DesktopJarRuntimeTest {
     }
 
     @Test
+    fun `dynamic dex keeps its own plugin class while sharing the host crawler API`() {
+        val plugin = "com/github/catvod/spider/NestedProbe"
+        val crawler = Spider::class.java.name.replace('.', '/')
+        fun type(marker: String) = classBytes(plugin, crawler) { writer ->
+            writer.method(ACC_PUBLIC or ACC_STATIC, "marker", "()Ljava/lang/String;") { method ->
+                method.visitLdcInsn(marker)
+                method.visitInsn(ARETURN)
+            }
+        }
+        runtime()
+        val parent = load(mapOf(plugin to type("outer")))
+        val inner = File(dir, "inner.jar")
+        ZipOutputStream(inner.outputStream()).use { zip ->
+            for ((name, bytes) in mapOf(plugin to type("inner"), crawler to classBytes(crawler, "java/lang/Object"))) {
+                zip.putNextEntry(ZipEntry("$name.class"))
+                zip.write(bytes)
+                zip.closeEntry()
+            }
+        }
+        val loader = DexClassLoader(inner.path, "", null, parent)
+        val name = plugin.replace('/', '.')
+        val outerType = parent.loadClass(name)
+        val innerType = loader.loadClass(name)
+        assertSame(loader, innerType.classLoader)
+        assertSame(Spider::class.java, innerType.superclass)
+        assertEquals("outer", outerType.getMethod("marker").invoke(null))
+        assertEquals("inner", innerType.getMethod("marker").invoke(null))
+    }
+
+    @Test
+    fun `guest storage metadata is limited to app directories without path aliases`() {
+        val storageRoot = dir.toPath()
+        val guestRoot = "/data/user/0/yingzhou.spider"
+        val storage = GuestStorage(storageRoot)
+        File(dir, "files").mkdir()
+        File(dir, "files/payload.dex").writeText("archive")
+        File(dir, "outside.dex").writeText("private")
+        assertTrue(storage.attributes("$guestRoot/files")!!.isDirectory)
+        assertTrue(storage.attributes("$guestRoot/files/payload.dex")!!.isRegularFile)
+        assertNull(storage.attributes("$guestRoot/files/missing.dex"))
+        assertNull(storage.attributes("$guestRoot/files/../outside.dex"))
+        assertNull(storage.attributes("$guestRoot/files/.. /outside.dex"))
+        assertNull(storage.attributes("$guestRoot/files/payload.dex:secret"))
+        assertNull(storage.attributes("$guestRoot/outside.dex"))
+    }
+
+    @Test
+    fun `Wex archives see Java streaming mode during spider startup`() = runBlocking {
+        val name = "com/github/catvod/spider/WexFixtureGuard"
+        val archive = ByteArrayOutputStream()
+        ZipOutputStream(archive).use { zip ->
+            zip.putNextEntry(ZipEntry("$name.class"))
+            zip.write(classBytes(name, WexModeProbe::class.java.name.replace('.', '/')))
+            zip.closeEntry()
+        }
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest) = MockResponse().setBody(Buffer().write(archive.toByteArray()))
+        }
+        val host = runtime()
+        host.onConfig(TvboxConfig(spider = server.url("/wex-fixture.jar").toString()))
+        val site = SiteBean(key = "wex", name = "Wex fixture", type = 3, api = "csp_WexFixtureGuard")
+        val spider = host.create(site, "")
+        assertEquals("java", spider.home(true))
+    }
+
+    open class WexModeProbe : Spider() {
+        private var mode = ""
+
+        override fun init(context: Context, extend: String) {
+            mode = context.getSharedPreferences("NewWexFnw_preferences", Context.MODE_PRIVATE).getString("pan.thread_proxy_mode", "")
+        }
+
+        override fun homeContent(filter: Boolean) = mode
+    }
+
+    @Test
     fun `self invokespecial left by invoke-super is pointed at the superclass`() {
         val classes = linkedMapOf(
             "t/Base" to classBytes("t/Base", "java/lang/Object") { cw ->

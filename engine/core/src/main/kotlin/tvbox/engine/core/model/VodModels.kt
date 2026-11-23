@@ -97,7 +97,17 @@ data class PlayRequest(
      * served from the stream cache. [PlayInfo.relay] is then the address through the cache, to fall back to.
      */
     val direct: Boolean = false,
+    val offerDriveSignIn: Boolean = false,
 )
+
+@Serializable
+data class DriveSignInPrompt(val handle: String, val provider: String, val qrUrl: String)
+
+@Serializable
+data class DriveSignInPoll(val site: String, val handle: String)
+
+@Serializable
+data class DriveSignInStatus(val status: String)
 
 @Serializable
 data class SniffRequest(
@@ -117,6 +127,7 @@ data class PlayInfo(
     val sniff: SniffRequest? = null,
     /** Which parser produced the url, for display ("" when none was needed). */
     val parsedBy: String = "",
+    val driveSignIn: DriveSignInPrompt? = null,
     /**
      * Not empty when the engine's stream cache serves [url] (or [relay], when that is set): what was played or read
      * ahead stays on the engine's disk, and `/api/v1/stream-cache/coverage?key=` with this value says which parts

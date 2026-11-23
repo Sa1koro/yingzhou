@@ -208,6 +208,7 @@ class PlayInfo {
     this.danmaku = '',
     this.download = '',
     this.relay = '',
+    this.driveSignIn,
   });
 
   /// `direct` or `sniff`.
@@ -216,6 +217,7 @@ class PlayInfo {
   final Map<String, String> headers;
   final String? sniffPageUrl;
   final String parsedBy;
+  final DriveSignInPrompt? driveSignIn;
 
   /// Not empty when the engine's stream cache serves [url] (or [relay] when that is set); the key to ask the engine
   /// which parts it holds.
@@ -246,6 +248,24 @@ class PlayInfo {
         danmaku: j['danmaku'] as String? ?? '',
         download: j['download'] as String? ?? '',
         relay: j['relay'] as String? ?? '',
+        driveSignIn: switch (j['driveSignIn']) {
+          final Map<String, dynamic> prompt => DriveSignInPrompt.fromJson(prompt),
+          _ => null,
+        },
+      );
+}
+
+class DriveSignInPrompt {
+  const DriveSignInPrompt({required this.handle, required this.provider, required this.qrUrl});
+
+  final String handle;
+  final String provider;
+  final String qrUrl;
+
+  factory DriveSignInPrompt.fromJson(Map<String, dynamic> json) => DriveSignInPrompt(
+        handle: json['handle'] as String,
+        provider: json['provider'] as String,
+        qrUrl: json['qrUrl'] as String,
       );
 }
 

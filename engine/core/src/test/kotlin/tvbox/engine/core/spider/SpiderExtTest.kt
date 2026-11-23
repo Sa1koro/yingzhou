@@ -18,7 +18,9 @@ import tvbox.engine.core.config.ConfigLocator
 import tvbox.engine.core.config.SiteBean
 import tvbox.engine.core.config.SiteRuntime
 import tvbox.engine.core.model.Capabilities
+import tvbox.engine.core.model.DriveSignInPoll
 import tvbox.engine.core.model.EngineInfo
+import tvbox.engine.core.model.PlayRequest
 import tvbox.engine.core.net.SiteHttp
 import java.util.Collections
 
@@ -36,6 +38,9 @@ class SpiderExtTest {
     /** What each spider was created with, by site key. */
     private val created = java.util.concurrent.ConcurrentHashMap<String, String>()
     private var recommended: () -> String? = { null }
+    private var readyForSignIn = false
+    private var signedIn = false
+    private val played = mutableListOf<Pair<String, String>>()
 
     private val runtime = object : SpiderRuntime {
         override val kind = "jar"
@@ -49,7 +54,27 @@ class SpiderExtTest {
                 override suspend fun category(tid: String, pg: String, filter: Boolean, extend: Map<String, String>): String? = null
                 override suspend fun detail(id: String): String? = null
                 override suspend fun search(key: String, quick: Boolean, pg: String): String? = null
-                override suspend fun play(flag: String, id: String, vipFlags: List<String>): String? = null
+                override suspend fun play(flag: String, id: String, vipFlags: List<String>): String? {
+                    if (!readyForSignIn) return null
+                    played += flag to id
+                    return if (signedIn) """{"url":"https://cdn.test/movie.mp4","parse":0}"""
+                    else """{"msg":"[quark](resolvePlay) 未登录"}"""
+                }
+                override val supportsDriveSignIn get() = readyForSignIn && site.key == "app"
+                override suspend fun driveSignIn(params: Map<String, String>): ProxyResponse {
+                    assertEquals("pan", params["do"])
+                    assertEquals("quark", params["provider"])
+                    val payload = when (params["action"]) {
+                        "loginStart" -> """{"code":0,"qrUrl":"https://login.test/link","taskId":"plugin-private-task"}"""
+                        "loginPoll" -> {
+                            assertEquals("plugin-private-task", params["taskId"])
+                            signedIn = true
+                            """{"status":"success"}"""
+                        }
+                        else -> error("Unexpected sign-in action")
+                    }
+                    return ProxyResponse(200, "application/json", payload.byteInputStream())
+                }
                 override suspend fun live(url: String) = "组,#genre#\n台,http://s.test/1.m3u8"
                 override fun destroy() {}
             }
@@ -131,5 +156,24 @@ class SpiderExtTest {
 
         engine.detail("cms", "9")
         assertEquals(listOf("CMS-EXTEND"), extendParams, "TVBox getFixUrl: a CMS site's url ext is sent as its text")
+    }
+
+    @Test
+    fun `spider QR authorizes the same source and lets the original episode resolve`() = runBlocking {
+        readyForSignIn = true
+        val engine = engine()
+        engine.activate(engine.addSubscription(url("/tv.json"), null).id)
+        val request = PlayRequest("app", "line", "episode", offerDriveSignIn = true)
+        val waiting = engine.resolvePlay(request)
+        assertEquals("drive_sign_in", waiting.kind)
+        val prompt = requireNotNull(waiting.driveSignIn)
+        assertEquals("quark", prompt.provider)
+        assertEquals("https://login.test/link", prompt.qrUrl)
+        assertTrue(prompt.handle != "plugin-private-task")
+        assertEquals("expired", engine.pollDriveSignIn(DriveSignInPoll("keyed", prompt.handle)).status)
+        assertEquals("success", engine.pollDriveSignIn(DriveSignInPoll("app", prompt.handle)).status)
+        assertEquals("expired", engine.pollDriveSignIn(DriveSignInPoll("app", prompt.handle)).status)
+        assertEquals("https://cdn.test/movie.mp4", engine.resolvePlay(request.copy(offerDriveSignIn = false)).url)
+        assertEquals(listOf("line" to "episode", "line" to "episode"), played)
     }
 }

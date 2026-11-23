@@ -26,6 +26,9 @@ interface Spider {
     /** Spider-side proxy (`/proxy?do=...`), used by some sites to serve media or rewrite playlists. */
     suspend fun proxy(params: Map<String, String>): ProxyResponse? = null
 
+    val supportsDriveSignIn: Boolean get() = false
+    suspend fun driveSignIn(params: Map<String, String>): ProxyResponse? = null
+
     fun destroy()
 }
 

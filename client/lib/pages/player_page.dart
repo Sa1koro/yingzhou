@@ -30,6 +30,7 @@ import '../ui/user_mode.dart';
 import 'browse_page.dart' show errorText;
 import 'danmaku_layer.dart';
 import 'danmaku_panel.dart';
+import 'drive_sign_in_dialog.dart';
 import 'player_dev.dart';
 import 'player_mobile.dart';
 import 'player_tracks.dart';
@@ -615,7 +616,7 @@ class _PlayerPageState extends State<PlayerPage> {
 
   /// Resolves the episode on that line and hands the address to the player. [resume] carries a position over;
   /// [automatic] marks a line the page turned to by itself.
-  Future<void> _open(int line, int episode, {Duration? resume, bool automatic = false}) async {
+  Future<void> _open(int line, int episode, {Duration? resume, bool automatic = false, bool offerDriveSignIn = true}) async {
     final seq = ++_requestSeq;
     final client = _client;
     if (seq > 1) _saveProgress();
@@ -659,7 +660,9 @@ class _PlayerPageState extends State<PlayerPage> {
     final PlayInfo info;
     final asked = Stopwatch()..start();
     try {
-      info = await client.resolvePlay(_detail.site, _currentLine.name, _currentEpisode.id, direct: fetchDirect);
+      info = await client.resolvePlay(
+        _detail.site, _currentLine.name, _currentEpisode.id, direct: fetchDirect, offerDriveSignIn: offerDriveSignIn && !automatic,
+      );
     } catch (e) {
       if (mounted && seq == _requestSeq) {
         final issue = e is EngineException ? e.diagnostic : null;
@@ -670,6 +673,20 @@ class _PlayerPageState extends State<PlayerPage> {
       return;
     }
     if (!mounted || seq != _requestSeq) return;
+    final prompt = info.driveSignIn;
+    if (prompt != null) {
+      final signedIn = await showDialog<bool>(
+        context: context,
+        builder: (_) => DriveSignInDialog(prompt: prompt, poll: () => client.pollDriveSignIn(_detail.site, prompt.handle)),
+      );
+      if (!mounted || seq != _requestSeq) return;
+      if (signedIn == true) {
+        await _open(line, episode, resume: resume, automatic: automatic, offerDriveSignIn: false);
+      } else {
+        _lineFailed('网盘授权未完成', '网盘授权未完成，请重试当前剧集。');
+      }
+      return;
+    }
     _resolveMs = asked.elapsedMilliseconds;
     _log(DevLevel.info, '解析', '${_lineLabel(line)} ${_currentEpisode.name} → ${info.isDirect ? (info.parsedBy.isEmpty ? '直链' : _parserLabel(info.parsedBy)) : '需要网页嗅探'} · $_resolveMs ms', shareSummary: '第 ${line + 1} 条 · ${info.isDirect ? '取得播放地址' : '需要网页嗅探'} · $_resolveMs ms', detail: {
       '站点': _detail.site,

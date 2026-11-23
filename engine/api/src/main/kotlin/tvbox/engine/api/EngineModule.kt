@@ -263,7 +263,14 @@ fun Application.engineModule(engine: Engine, options: EngineModuleOptions = Engi
 
             post("/play/resolve") {
                 val request = call.receive<PlayRequest>()
-                call.respond(forClient(call.drivePlay(options.drives, request) ?: engine.resolvePlay(request), call))
+                val info = call.drivePlay(options.drives, request) ?: engine.resolvePlay(request)
+                if (info.driveSignIn != null) call.response.headers.append("Cache-Control", "no-store")
+                call.respond(forClient(info, call))
+            }
+
+            post("/play/drive-sign-in/poll") {
+                call.response.headers.append("Cache-Control", "no-store")
+                call.respond(engine.pollDriveSignIn(call.receive<tvbox.engine.core.model.DriveSignInPoll>()))
             }
 
             route("/history") {
