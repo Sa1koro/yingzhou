@@ -1,5 +1,6 @@
 package tvbox.engine.jar
 
+import com.github.unidbg.linux.android.dvm.DvmClass
 import com.github.unidbg.linux.android.dvm.DvmObject
 import com.github.unidbg.linux.android.dvm.StringObject
 import com.github.unidbg.linux.android.dvm.VM
@@ -8,7 +9,11 @@ import com.github.unidbg.linux.android.dvm.array.ArrayObject
 import com.github.unidbg.linux.android.dvm.array.ByteArray as GuestBytes
 import java.util.IdentityHashMap
 
-internal class GuestObjects(private val vm: VM, private val isArchiveClass: (Class<*>) -> Boolean) {
+internal class GuestObjects(
+    private val vm: VM,
+    private val ownsReference: (Any) -> Boolean = { false },
+    private val archiveClass: (String) -> Class<*>?,
+) {
     private val inputs = IdentityHashMap<Any, DvmObject<*>>()
     private val originals = IdentityHashMap<DvmObject<*>, Any>()
     private val arrays = IdentityHashMap<ArrayObject, Array<Any?>>()
@@ -19,7 +24,11 @@ internal class GuestObjects(private val vm: VM, private val isArchiveClass: (Cla
         inputs[value]?.let { return it }
         val guest = when (value) {
             is String -> StringObject(vm, value)
-            is Class<*> -> vm.resolveClass(value.name.replace('.', '/'))
+            is Class<*> -> {
+                val name = value.name.replace('.', '/')
+                check(archiveClass(name)?.let { it === value } != false) { "Android JNI class belongs to a different loader" }
+                vm.resolveClass(name)
+            }
             is android.content.res.AssetManager -> AssetManager(vm, "assets")
             is ByteArray -> GuestBytes(vm, value.copyOf())
             is Array<*> -> {
@@ -29,7 +38,7 @@ internal class GuestObjects(private val vm: VM, private val isArchiveClass: (Cla
                 value.forEachIndexed { index, item -> array.value[index] = wrap(item, depth + 1) }
                 array
             }
-            else -> vm.resolveClass(value.javaClass.name.replace('.', '/')).newObject(value.takeIf { isArchiveClass(it.javaClass) })
+            else -> vm.resolveClass(value.javaClass.name.replace('.', '/')).newObject(value.takeIf { ownsReference(it) || isArchiveClass(it.javaClass) })
         }
         inputs[value] = guest
         originals[guest] = value
@@ -40,6 +49,7 @@ internal class GuestObjects(private val vm: VM, private val isArchiveClass: (Cla
         if (guest == null) return null
         val value = originals[guest] ?: when (guest) {
             is StringObject -> guest.value
+            is DvmClass -> archiveClass(guest.className) ?: error("Android JNI returned a class outside the spider archive")
             is GuestBytes -> guest.value.copyOf()
             is ArrayObject -> arrays[guest] ?: run {
                 reserve(guest.length(), depth)
@@ -52,7 +62,7 @@ internal class GuestObjects(private val vm: VM, private val isArchiveClass: (Cla
                 guest.value.forEachIndexed { index, item -> result[index] = unwrap(item, component, depth + 1) }
                 result
             }
-            else -> guest.value?.takeIf { isArchiveClass(it.javaClass) } ?: error("Android JNI returned an unmapped guest reference")
+            else -> guest.value?.takeIf { ownsReference(it) || isArchiveClass(it.javaClass) } ?: error("Android JNI returned an unmapped guest reference")
         }
         check(when (expected) {
             "[B" -> value is ByteArray
@@ -64,6 +74,8 @@ internal class GuestObjects(private val vm: VM, private val isArchiveClass: (Cla
         }) { "Android JNI returned an unexpected reference type" }
         return value
     }
+
+    private fun isArchiveClass(type: Class<*>): Boolean = archiveClass(type.name.replace('.', '/')) === type
 
     fun copyBack() {
         originals.forEach { (guest, original) ->

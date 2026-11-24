@@ -47,6 +47,8 @@ class DesktopEngine implements LocalEngine {
       return false;
     }
     final java = _findJava(engineDir);
+    final yingxia = Directory('${engineDir.path}${Platform.pathSeparator}yingxia-java');
+    final scriptHosts = Directory('${engineDir.path}${Platform.pathSeparator}yingxia-scripts');
     final args = [
       '-Xss1m',
       '-XX:+UseSerialGC',
@@ -68,6 +70,8 @@ class DesktopEngine implements LocalEngine {
       '--port',
       '$port',
       '--exit-with-stdin',
+      if (Platform.isWindows && yingxia.existsSync()) ...['--yingxia-host', yingxia.path],
+      if (Platform.isWindows && scriptHosts.existsSync()) ...['--yingxia-script-hosts', scriptHosts.path],
       ...extraArgs,
     ];
     _diag.store.engineStarted('$java ${args.join(' ')}');

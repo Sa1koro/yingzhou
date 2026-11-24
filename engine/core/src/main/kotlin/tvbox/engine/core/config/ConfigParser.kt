@@ -92,6 +92,7 @@ object ConfigParser {
                 timeout = int(obj, "timeout", 0),
                 click = str(obj, "click", ""),
                 style = str(obj, "style", ""),
+                catPawOpen = obj.get("catPawOpen")?.takeUnless { it.isJsonNull }?.let { str(obj, "catPawOpen", "") },
             )
         }.getOrNull()
     }

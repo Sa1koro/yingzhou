@@ -1,10 +1,16 @@
 package tvbox.engine.jar
 
+import com.github.unidbg.linux.android.AndroidEmulatorBuilder
+import com.github.unidbg.linux.android.dvm.BaseVM
+import com.github.unidbg.linux.android.dvm.CallbackArguments
+import com.github.unidbg.linux.android.dvm.StringObject
+import com.github.unidbg.linux.android.dvm.array.ByteArray as GuestBytes
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import tvbox.engine.core.spider.spiderDiagnostic
 import java.io.File
+import java.io.IOException
 import java.lang.reflect.InvocationTargetException
 import java.nio.file.Files
 import java.util.Base64
@@ -159,6 +165,43 @@ class AndroidJniLoaderTest {
                 val retry = assertThrows(InvocationTargetException::class.java) { unsupported.invoke(null, application) }
                 val site = spiderDiagnostic("site", "spider.create", retry, shared.archive, shared)
                 assertEquals(shared.nativeOperation, site.initNativeOperation)
+            }
+        }
+    }
+
+    @Test fun `archive class loader returns private resources and preserves JNI stream state`() {
+        AndroidJniLoader.open(archive("arm64"), dir, enabled = true).use { classLoader ->
+            val loader = classLoader as AndroidJniLoader
+            val owner = "tvbox/fixture/NativeMath"
+            AndroidEmulatorBuilder.for64Bit().setRootDir(dir).build().use { emulator ->
+                val vm = emulator.createDalvikVM() as BaseVM
+                val callbacks = GuestJavaCallbacks({ it == owner }, GuestStorage(null), loader::resource, loader)
+                fun args(owner: String, name: String, descriptor: String, vararg values: Any) =
+                    CallbackArguments(vm, owner, name, descriptor, *values)
+                val type = vm.resolveClass(owner)
+                val guestLoader = callbacks.callObjectMethod(vm, type, "java/lang/Class->getClassLoader()Ljava/lang/ClassLoader;",
+                    args("java/lang/Class", "getClassLoader", "()Ljava/lang/ClassLoader;"))!!
+                val readResource = "(Ljava/lang/String;)Ljava/io/InputStream;"
+                fun open(name: String) = callbacks.callObjectMethod(vm, guestLoader, "java/lang/ClassLoader->getResourceAsStream$readResource",
+                    args("java/lang/ClassLoader", "getResourceAsStream", readResource, vm.addLocalObject(StringObject(vm, name))))
+                val resource = open("private-value")!!
+                val input = "java/io/InputStream"
+                fun readOne() = callbacks.callIntMethod(vm, resource, "$input->read()I", args(input, "read", "()I"))
+                val buffer = GuestBytes(vm, ByteArray(4))
+                assertEquals('2'.code, readOne())
+                assertEquals(1, callbacks.callIntMethod(vm, resource, "$input->read([BII)I",
+                    args(input, "read", "([BII)I", vm.addLocalObject(buffer), 2, 1)))
+                assertArrayEquals(byteArrayOf(0, 0, '1'.code.toByte(), 0), buffer.value)
+                assertEquals(-1, readOne())
+                repeat(2) { callbacks.callVoidMethod(vm, resource, "$input->close()V", args(input, "close", "()V")) }
+                assertThrows(IOException::class.java) { readOne() }
+                for (name in listOf("absent", "../private-value", "/private-value", "java/lang/Object.class", "assets/demo/", "assets/${"x".repeat(513)}")) {
+                    assertNull(open(name), name)
+                }
+                val owned = loader.loadClass("tvbox.fixture.NativeMath")
+                val values = GuestObjects(vm) { if (it == owner) owned else null }
+                assertSame(owned, values.unwrap(type, "Ljava/lang/Class;"))
+                assertThrows(IllegalStateException::class.java) { values.unwrap(vm.resolveClass("java/lang/System"), "Ljava/lang/Class;") }
             }
         }
     }

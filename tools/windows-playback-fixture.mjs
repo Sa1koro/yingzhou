@@ -3,6 +3,7 @@ import { createServer } from 'node:http';
 import { join, resolve } from 'node:path';
 
 const root = resolve(process.argv[2] ?? 'engine/build/playback-fixture');
+const jar = process.argv[3];
 const base = 'http://127.0.0.1:19979';
 const siteFor = (kind) => ({ key: `local-${kind}`, name: `本地验收站 ${kind}`, type: 1, api: `${base}/cms?kind=${kind}`, searchable: 1, quickSearch: 1 });
 const movieFor = (kind) => ({ vod_id: 'fixture', vod_name: '本地验收色条', type_id: '1', vod_play_from: '本地测试线路',
@@ -10,6 +11,23 @@ const movieFor = (kind) => ({ vod_id: 'fixture', vod_name: '本地验收色条',
 const server = createServer((request, response) => {
   const url = new URL(request.url, base);
   const route = url.pathname;
+  if (jar && route === '/config-jar.json') {
+    const site = { key: 'demo_jar', name: '本地 JavaHost 验收站', type: 3, api: 'csp_DemoJar',
+      jar: `${base}/spider-host.jar`, ext: { api: `${base}/jar-cms` } };
+    response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' }).end(JSON.stringify({ sites: [site] }));
+    return;
+  }
+  if (jar && route === '/spider-host.jar') {
+    response.writeHead(200, { 'Content-Type': 'application/java-archive' });
+    createReadStream(jar).pipe(response);
+    return;
+  }
+  if (jar && route === '/jar-cms') {
+    const movie = { ...movieFor('HLS'), vod_play_url: `HLS$${base}/fixture.m3u8#MP4$test-java-proxy-mp4` };
+    const payload = { class: [{ type_id: '1', type_name: '验收分类' }], list: [movie], page: 1, pagecount: 1, total: 1 };
+    response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' }).end(JSON.stringify(payload));
+    return;
+  }
   if (route === '/config.json' || route === '/cms') {
     const payload = route === '/config.json'
       ? { sites: ['MP4', 'HLS'].map(siteFor) }

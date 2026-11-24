@@ -22,6 +22,7 @@ data class SiteBean(
     val timeout: Int = 0,
     val click: String = "",
     val style: String = "",
+    val catPawOpen: String? = null,
 ) {
     val isSearchable: Boolean get() = searchable != 0
 
@@ -31,7 +32,7 @@ data class SiteBean(
             0, 1 -> SiteRuntime.CMS
             4 -> SiteRuntime.REMOTE
             3 -> when {
-                api.endsWith(".js") || api.contains(".js?") -> SiteRuntime.JS
+                catPawOpen != null || api.endsWith(".js") || api.contains(".js?") -> SiteRuntime.JS
                 api.contains(".py") -> SiteRuntime.PY
                 else -> SiteRuntime.JAR
             }

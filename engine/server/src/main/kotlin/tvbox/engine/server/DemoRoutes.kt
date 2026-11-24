@@ -29,7 +29,7 @@ import javax.imageio.ImageIO
  * Two sites come last, for switching sources: 演示豆瓣 (a recommendation site, see [DemoDouban]) and 演示失效站, the
  * same titles as 演示站 with every line dead (`/demo/dead/…`).
  */
-class DemoSite {
+class DemoSite(private val javaSpider: String = "spider.jar") {
     private val classes = listOf("1" to "电影", "2" to "剧集", "3" to "动漫", "4" to "纪录片")
     private val first = listOf("星河", "长夜", "山海", "迷城", "归途", "风起", "浮光", "暗涌", "逆流", "长安", "雾港", "白昼")
     private val second = listOf("之约", "纪事", "往事", "来信", "奇谈", "迷踪", "长歌", "未眠", "边境", "回声")
@@ -63,7 +63,7 @@ class DemoSite {
         // Asked only when the user switches the config's danmaku API on (it sends what is played to the API).
         put("danmaku", "$base/demo/danmaku/api?name={name}&episode={episode}")
         // The global spider jar also carries the "Json聚合" parser (com.github.catvod.parser.MixDemo).
-        put("spider", "$base/demo/spider.jar")
+        put("spider", "$base/demo/$javaSpider")
         put("sites", buildJsonArray {
             add(buildJsonObject {
                 put("key", "demo")
@@ -86,7 +86,7 @@ class DemoSite {
                 put("name", "演示JAR站")
                 put("type", 3)
                 put("api", "csp_DemoJar")
-                put("jar", "$base/demo/spider.jar")
+                put("jar", "$base/demo/$javaSpider")
                 put("searchable", 1)
                 put("ext", buildJsonObject { put("api", "$base/demo/api.php/provide/vod/") })
             })
@@ -306,7 +306,7 @@ class DemoSite {
     /** A cat-style JS spider wrapping the demo CMS api, to exercise the JS runtime end to end. */
     val spiderJs: String = """
         let api = '';
-        async function init(cfg) { api = cfg.ext.api; }
+        async function init(cfg) { api = (typeof cfg.ext === 'string' ? JSON.parse(cfg.ext) : cfg.ext).api; }
         async function home(filter) {
           const d = JSON.parse((await req(api, {})).content);
           d.list = d.list.map(v => Object.assign({}, v, { vod_remarks: 'JS · ' + (v.vod_remarks || '') }));
@@ -398,6 +398,11 @@ fun Route.demoRoutes(site: DemoSite) {
     get("/demo/spider.jar") {
         val jar = DemoSite::class.java.getResourceAsStream("/demo/spider.jar")?.use { it.readBytes() }
         if (jar == null) call.respondText("demo jar not built (engine/server/demo-jar/build.sh)", status = io.ktor.http.HttpStatusCode.NotFound)
+        else call.respondBytes(jar, ContentType.Application.OctetStream)
+    }
+    get("/demo/spider-host.jar") {
+        val jar = DemoSite::class.java.getResourceAsStream("/demo/spider-host.jar")?.use { it.readBytes() }
+        if (jar == null) call.respondText("demo host archive not built", status = io.ktor.http.HttpStatusCode.NotFound)
         else call.respondBytes(jar, ContentType.Application.OctetStream)
     }
     get("/demo/api.php/provide/vod/") {

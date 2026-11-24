@@ -8,7 +8,7 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:tvbox_client/app_state.dart';
 import 'package:tvbox_client/engine/engine_client.dart';
-import 'package:tvbox_client/engine/vod_models.dart';
+import 'package:tvbox_client/engine/local_engine_io.dart';
 import 'package:tvbox_client/pages/player_page.dart';
 import 'package:tvbox_client/pages/seek_bar.dart';
 import 'package:tvbox_client/player_backend.dart';
@@ -21,7 +21,12 @@ const fixtureUrl = 'http://127.0.0.1:19979/config.json';
 Future<void> main(List<String> arguments) async {
   final binding = WidgetsFlutterBinding.ensureInitialized();
   MediaKit.ensureInitialized();
-  final output = File(arguments.single);
+  final output = File(arguments.first);
+  final hosted = arguments.contains('--yingxia-demo');
+  final bundledEngine = arguments.contains('--bundled-engine')
+      ? DesktopEngine(extraArgs: ['--data', '${output.path}.engine'])
+      : null;
+  var stage = 'connect';
   final tree = GlobalKey();
   final navigator = GlobalKey<NavigatorState>();
   var backend = Completer<PlayerBackend>();
@@ -49,21 +54,44 @@ Future<void> main(List<String> arguments) async {
   final results = <Map<String, Object>>[];
   try {
     await binding.endOfFrame;
+    if (bundledEngine != null) {
+      stage = 'start bundled engine';
+      if (!await bundledEngine.start(9978)) throw StateError('Bundled engine did not start');
+      final client = HttpClient();
+      try {
+        await _untilAsync(() async {
+          try {
+            final response = await (await client.getUrl(Uri.parse('$engineUrl/api/v1/info'))).close();
+            await response.drain<void>();
+            return response.statusCode == 200;
+          } on SocketException {
+            return false;
+          }
+        });
+      } finally {
+        client.close(force: true);
+      }
+    }
     await state.connect();
-    await state.importSubscription(fixtureUrl);
-    for (final kind in ['MP4', 'HLS']) {
-      final key = 'local-$kind';
+    stage = 'import';
+    await state.importSubscription(hosted ? fixtureUrl.replaceFirst('config.json', 'config-jar.json') : fixtureUrl);
+    for (final kind in hosted ? ['HLS', 'MP4'] : ['MP4', 'HLS']) {
+      final key = hosted ? 'demo_jar' : 'local-$kind';
+      stage = '$kind home';
       final home = await state.client.home(key);
-      final card = home.list.single;
-      final detail = await state.client.detail(key, card.id);
+      if (home.list.isEmpty) throw StateError('Demo home returned no playable selection');
+      stage = '$kind detail';
+      final detail = await state.client.detail(key, home.list.single.id);
       backend = Completer<PlayerBackend>();
       final clock = Stopwatch()..start();
-      final route = MaterialPageRoute<void>(builder: (_) => PlayerPage(detail: detail, line: 0, episode: 0));
+      final route = MaterialPageRoute<void>(builder: (_) => PlayerPage(detail: detail, line: 0, episode: hosted && kind == 'MP4' ? 1 : 0));
       unawaited(navigator.currentState!.push(route));
+      stage = '$kind first frame';
       final media = await backend.future.timeout(const Duration(seconds: 10));
       await (media.view as Video).controller.waitUntilFirstFrameRendered.timeout(const Duration(seconds: 30));
       final firstFrameMs = clock.elapsedMilliseconds;
       final player = media.player;
+      stage = '$kind initial playback';
       await _until(() => player.state.position >= const Duration(seconds: 1) && player.state.duration > Duration.zero);
       if (player.state.position > const Duration(seconds: 10)) throw StateError('Media started from saved position');
       final seek = _findSeekBar(tree.currentContext! as Element) ?? (throw StateError('Seek bar is absent'));
@@ -72,6 +100,7 @@ Future<void> main(List<String> arguments) async {
       final middle = box.localToGlobal(box.size.center(Offset.zero));
       final pointer = kind == 'MP4' ? 120 : 121;
       final seekClock = Stopwatch()..start();
+      stage = '$kind seek';
       binding.handlePointerEvent(PointerDownEvent(pointer: pointer, position: left));
       binding.handlePointerEvent(PointerMoveEvent(pointer: pointer, position: middle, delta: middle - left, buttons: kPrimaryButton));
       binding.handlePointerEvent(PointerUpEvent(pointer: pointer, position: middle));
@@ -85,10 +114,20 @@ Future<void> main(List<String> arguments) async {
       await route.completed;
     }
     output.writeAsStringSync(jsonEncode({'status': 'passed', 'lines': results}));
+    bundledEngine?.stop();
     exit(0);
   } catch (error) {
-    output.writeAsStringSync(jsonEncode({'status': 'failed', 'reason': error.runtimeType.toString(), 'lines': results}));
+    output.writeAsStringSync(jsonEncode({'status': 'failed', 'stage': stage, 'reason': error.runtimeType.toString(), 'lines': results}));
+    bundledEngine?.stop();
     exit(1);
+  }
+}
+
+Future<void> _untilAsync(Future<bool> Function() condition) async {
+  final clock = Stopwatch()..start();
+  while (!await condition()) {
+    if (clock.elapsed > const Duration(seconds: 15)) throw TimeoutException('Bundled engine did not become ready');
+    await Future<void>.delayed(const Duration(milliseconds: 100));
   }
 }
 

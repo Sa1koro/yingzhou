@@ -5,6 +5,8 @@ Yingzhou (映舟) is licensed under AGPL-3.0 (see `LICENSE`). It includes code a
 ## 映匣 / tvbox-silicon — GPL-3.0
 
 - The desktop Wex sign-in protocol and Java stream proxy setting follow `Runtime/JavaHost` at revision `1f29cadb6576e7dc7f102da7479c25887609f948`, particularly `OwnDriveSignIn`, `CloudDriveBridge`, and `PluginSession`. The nested DEX delegation policy follows `dalvik.system.DexClassLoader`. Yingzhou implements these behaviors through its own runtime and client interfaces.
+- The Windows bundle's `engine/yingxia-java` contains the JavaHost from [tvbox-silicon](https://github.com/jo32/tvbox-silicon) at `187c878fd3a8c1d379c8ef578f5825cba7bf0050`. It runs `tvbox.runtime.ProcessHost` in a separate process and preserves the upstream Maven dependency versions and pinned Sardine Android AAR. `tools/build-yingxia-java.ps1` applies a Windows fallback for writing DEX conversion output when ZIP FS is read-only. `LICENSE.txt`, `THIRD_PARTY_NOTICES.md`, and `upstream-source.tar` in the bundle include the corresponding source and notices.
+- `engine/yingxia-scripts` contains ScriptHost, PythonHost and their bundled assets from the same revision. It includes the corresponding sources, upstream notices, Node.js and CPython licenses, and the Python wheels' license metadata. See `tools/build-yingxia-scripts.ps1` for the pinned Windows runtimes.
 
 ## TVBoxOS — AGPL-3.0
 

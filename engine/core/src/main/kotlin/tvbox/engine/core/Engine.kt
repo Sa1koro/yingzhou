@@ -458,7 +458,7 @@ class Engine(
             active?.sources?.values?.forEach { (it as? SpiderSource)?.destroy() }
             liveSpiders.values.forEach { runCatching { it.destroy() } }
             liveSpiders.clear()
-            runtimes.forEach { it.onConfig(config) }
+            runtimes.forEach { it.onConfig(config, url) }
             network?.onConfig(config)
             live.onConfig(config.livesJson)
             active = loaded

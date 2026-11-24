@@ -48,6 +48,18 @@ cp="$root/engine/server/build/install/tvbox-engine/lib/*"
 mkdir -p "$root/dist"
 
 if [ "$os" = windows ]; then
+  echo "== Yingxia JavaHost"
+  yingxia="${YINGXIA_JAVA_BUNDLE:-$root/engine/server/build/yingxia-java}"
+  if [ ! -f "$yingxia/host.jar" ]; then
+    pwsh -NoProfile -File "$(cygpath -w "$root/tools/build-yingxia-java.ps1")" -OutputDirectory "$(cygpath -w "$yingxia")"
+  fi
+  yingxia_scripts="${YINGXIA_SCRIPT_BUNDLE:-$root/engine/server/build/yingxia-scripts}"
+  if [ ! -f "$yingxia_scripts/revision.txt" ]; then
+    pwsh -NoProfile -File "$(cygpath -w "$root/tools/build-yingxia-scripts.ps1")" -OutputDirectory "$(cygpath -w "$yingxia_scripts")"
+  fi
+  "$jre/bin/java" -Dstdout.encoding=UTF-8 -cp "$cp" tvbox.engine.server.MainKt --demo --check --only jar,js,py --play --strict \
+    --yingxia-host "$(cygpath -w "$yingxia")" --yingxia-script-hosts "$(cygpath -w "$yingxia_scripts")"
+
   echo "== client"
   (cd "$root/client" && flutter build windows --release)
 
@@ -56,6 +68,8 @@ if [ "$os" = windows ]; then
   mkdir -p "$out/engine"
   cp -r "$root/engine/server/build/install/tvbox-engine/lib" "$out/engine/lib"
   cp -r "$jre" "$out/engine/jre"
+  cp -r "$yingxia" "$out/engine/yingxia-java"
+  cp -r "$yingxia_scripts" "$out/engine/yingxia-scripts"
   cp "$root/LICENSE" "$out/LICENSE.txt"
   cp "$root/THIRD-PARTY-NOTICES.md" "$out/"
 

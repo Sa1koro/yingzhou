@@ -256,13 +256,15 @@ class PlayInfo {
 }
 
 class DriveSignInPrompt {
-  const DriveSignInPrompt({required this.handle, required this.provider, required this.qrUrl});
+  const DriveSignInPrompt({required this.handle, required this.provider, required this.qrUrl, this.image});
 
   final String handle;
   final String provider;
   final String qrUrl;
+  final String? image;
 
   factory DriveSignInPrompt.fromJson(Map<String, dynamic> json) => DriveSignInPrompt(
+        image: json['image'] as String?,
         handle: json['handle'] as String,
         provider: json['provider'] as String,
         qrUrl: json['qrUrl'] as String,

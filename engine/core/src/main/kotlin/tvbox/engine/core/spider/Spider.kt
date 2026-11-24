@@ -3,6 +3,8 @@ package tvbox.engine.core.spider
 import tvbox.engine.core.config.SiteBean
 import tvbox.engine.core.config.TvboxConfig
 import tvbox.engine.core.model.SpiderDiagnostic
+import tvbox.engine.core.model.DriveSignInPrompt
+import tvbox.engine.core.model.DriveSignInStatus
 
 /**
  * The TVBox spider contract (`com.github.catvod.crawler.Spider`), independent of how the spider runs
@@ -19,6 +21,11 @@ interface Spider {
     suspend fun detail(id: String): String?
     suspend fun search(key: String, quick: Boolean, pg: String): String?
     suspend fun play(flag: String, id: String, vipFlags: List<String>): String?
+
+    suspend fun playWithSignIn(flag: String, id: String, vipFlags: List<String>, onPrompt: (DriveSignInPrompt) -> Unit): String? =
+        play(flag, id, vipFlags)
+
+    suspend fun pollHostedSignIn(handle: String): DriveSignInStatus? = null
 
     /** A live playlist (TXT / M3U / JSON text) for a `lives` entry of `type: 3` (`liveContent`); null when the spider has none. */
     suspend fun live(url: String): String? = null
@@ -58,6 +65,8 @@ interface SpiderRuntime {
 
     /** Called when a config becomes active (and before its spiders are created), e.g. to pick up the global `spider` jar. */
     fun onConfig(config: TvboxConfig) {}
+
+    fun onConfig(config: TvboxConfig, origin: String) = onConfig(config)
 
     fun onConfigRemoved() {}
 

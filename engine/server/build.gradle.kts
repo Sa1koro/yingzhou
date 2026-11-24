@@ -18,6 +18,23 @@ dependencies {
     testRuntimeOnly(libs.junit.launcher)
 }
 
+val demoHostClasses by tasks.registering(JavaCompile::class) {
+    source = fileTree("demo-jar/src") { include("**/*.java") }
+    classpath = configurations.compileClasspath.get()
+    destinationDirectory = layout.buildDirectory.dir("demo-host-classes")
+    options.release = 11
+    options.encoding = "UTF-8"
+}
+
+val demoHostArchive by tasks.registering(Jar::class) {
+    archiveFileName = "spider-host.jar"
+    from(demoHostClasses)
+}
+
+tasks.processResources {
+    from(demoHostArchive) { into("demo") }
+}
+
 application {
     mainClass.set("tvbox.engine.server.MainKt")
     applicationName = "tvbox-engine"

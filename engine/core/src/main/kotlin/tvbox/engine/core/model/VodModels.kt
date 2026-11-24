@@ -101,7 +101,7 @@ data class PlayRequest(
 )
 
 @Serializable
-data class DriveSignInPrompt(val handle: String, val provider: String, val qrUrl: String)
+data class DriveSignInPrompt(val handle: String, val provider: String, val qrUrl: String, val image: String? = null)
 
 @Serializable
 data class DriveSignInPoll(val site: String, val handle: String)

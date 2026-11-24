@@ -28,6 +28,7 @@ import com.github.unidbg.pointer.UnidbgPointer
 import com.github.unidbg.unix.UnixEmulator
 import com.github.unidbg.virtualmodule.android.AndroidModule
 import org.objectweb.asm.Type
+import tvbox.engine.core.spider.SpiderNativeOperation
 import unicorn.Arm64Const
 import unicorn.ArmConst
 import java.io.File
@@ -43,10 +44,12 @@ internal class AndroidJniGuest @JvmOverloads constructor(
     classHierarchy: (String) -> GuestClassHierarchy? = { null },
     private val archiveClass: (String) -> Class<*>? = { null },
     storage: GuestStorage = GuestStorage(null),
+    resource: (String) -> ByteArray? = { null },
+    archiveClassLoader: ClassLoader? = null,
 ) : AutoCloseable {
     private val emulator: AndroidEmulator = emulator(is64Bit, root)
     private val vm: VM
-    private val callbacks = GuestJavaCallbacks(ownsClass, storage)
+    private val callbacks = GuestJavaCallbacks(ownsClass, storage, resource, archiveClassLoader)
     private val loaded = mutableMapOf<String, ByteArray>()
     private val receivers = IdentityHashMap<Any, DvmObject<*>>()
     private var closed = false
@@ -62,13 +65,13 @@ internal class AndroidJniGuest @JvmOverloads constructor(
             vm.setJni(callbacks.bridge)
             val archiveLoader = object : ClassLoader(null) {
                 override fun loadClass(name: String): Class<*> =
-                    archiveClass(name.replace('.', '/')) ?: throw ClassNotFoundException(name)
+                    guestClass(name.replace('.', '/')) ?: throw ClassNotFoundException(name)
             }
             val proxyFactory = ProxyClassFactory(archiveLoader).apply {
                 setFallbackJni(callbacks.bridge)
                 configObjectVisitor { member, _, _ ->
                     val owner = member.declaringClass
-                    if (archiveClass(owner.name.replace('.', '/')) !== owner) {
+                    if (guestClass(owner.name.replace('.', '/')) !== owner) {
                         throw UnsupportedOperationException("JNI proxy member is outside the spider archive")
                     }
                 }
@@ -82,12 +85,20 @@ internal class AndroidJniGuest @JvmOverloads constructor(
                     val hierarchy = when (name) {
                         "android/app/Application" -> GuestClassHierarchy("android/content/ContextWrapper", emptyList())
                         "android/content/ContextWrapper" -> GuestClassHierarchy("android/content/Context", emptyList())
-                        else -> classHierarchy(name)
+                        "java/io/FileOutputStream" -> GuestClassHierarchy("java/io/OutputStream", emptyList())
+                        "java/io/OutputStream" -> GuestClassHierarchy("java/lang/Object", listOf("java/io/Closeable", "java/io/Flushable"))
+                        "java/io/InputStream" -> GuestClassHierarchy("java/lang/Object", listOf("java/io/Closeable"))
+                        "java/io/Closeable" -> GuestClassHierarchy(null, listOf("java/lang/AutoCloseable"))
+                        "dalvik/system/DexClassLoader" -> GuestClassHierarchy("dalvik/system/BaseDexClassLoader", emptyList())
+                        "dalvik/system/BaseDexClassLoader" -> GuestClassHierarchy("java/lang/ClassLoader", emptyList())
+                        else -> classHierarchy(name) ?: callbacks.dexClass(name)?.let { type ->
+                            GuestClassHierarchy(type.superclass?.name?.replace('.', '/'), type.interfaces.map { it.name.replace('.', '/') })
+                        }
                     }
                     val superClass = parent ?: hierarchy?.parent?.let { vm.resolveClass(it) }
                     val resolvedInterfaces = if (interfaces.isNotEmpty()) interfaces
                     else hierarchy?.interfaces?.map { vm.resolveClass(it) }?.toTypedArray() ?: emptyArray()
-                    if (ownsClass(name)) proxyFactory.createClass(base, name, superClass, resolvedInterfaces)
+                    if (ownsClass(name) || callbacks.dexClass(name) != null) proxyFactory.createClass(base, name, superClass, resolvedInterfaces)
                     else base.createClass(base, name, superClass, resolvedInterfaces)
                 } finally {
                     resolving.remove(name)
@@ -155,7 +166,7 @@ internal class AndroidJniGuest @JvmOverloads constructor(
         val returns = returnType.descriptor
         require(returns in SUPPORTED || returnType.sort == Type.OBJECT || returns == "V") { "Unsupported Android JNI return type $returns" }
         require(parameterTypes.size == arguments.size) { "Android JNI argument count mismatch" }
-        val objects = GuestObjects(vm) { type -> archiveClass(type.name.replace('.', '/')) === type }
+        val objects = GuestObjects(vm, callbacks::ownsReturnedReference, ::guestClass)
         val args = Array<Any>(parameterTypes.size) { index ->
             val value = arguments[index]
             when (val type = parameterTypes[index].descriptor) {
@@ -211,6 +222,8 @@ internal class AndroidJniGuest @JvmOverloads constructor(
 
     private fun expired() = deadline != 0L && System.nanoTime() - deadline >= 0
 
+    private fun guestClass(name: String): Class<*>? = callbacks.dexClass(name) ?: archiveClass(name)
+
     private fun <T> runGuest(call: () -> T): T {
         callbacks.resetFailure()
         deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
@@ -221,7 +234,11 @@ internal class AndroidJniGuest @JvmOverloads constructor(
             }
         } catch (problem: Throwable) {
             failed = true
-            if (expired()) throw IllegalStateException("Android JNI guest timed out", problem)
+            callbacks.abortOpenOutputs()
+            if (expired()) {
+                val cause = callbacks.lastCallback?.let { SpiderNativeOperation("JNI callback $it", problem) } ?: problem
+                throw NativeLoadFailure("guest timed out", "Android JNI guest timed out (${callbacks.readProgress()})", cause)
+            }
             callbacks.failure?.let { failure ->
                 if (problem is Exception || problem is UnsatisfiedLinkError) throw failure
             }
@@ -236,6 +253,8 @@ internal class AndroidJniGuest @JvmOverloads constructor(
     override fun close() {
         if (!closed) {
             closed = true
+            callbacks.abortOpenOutputs()
+            callbacks.releaseDexLoaders()
             receivers.clear()
             emulator.close()
         }

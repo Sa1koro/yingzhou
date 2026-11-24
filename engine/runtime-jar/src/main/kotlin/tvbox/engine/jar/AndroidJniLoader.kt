@@ -64,9 +64,13 @@ class AndroidJniLoader private constructor(
         }
     }
 
-    private fun asset(name: String): ByteArray? {
+    private fun asset(name: String): ByteArray? = readArchiveEntry(name, "assets/")
+
+    internal fun resource(name: String): ByteArray? = readArchiveEntry(name, "")
+
+    private fun readArchiveEntry(name: String, prefix: String): ByteArray? {
         if (name.length !in 1..512 || '\\' in name || '\u0000' in name || name.split('/').any { it.isEmpty() || it == "." || it == ".." }) return null
-        val entry = entries.getJarEntry("assets/$name") ?: return null
+        val entry = entries.getJarEntry(prefix + name) ?: return null
         if (entry.isDirectory || entry.size !in 0..maxLibrary) return null
         return entries.getInputStream(entry).use { it.readNBytes(entry.size.toInt() + 1) }.takeIf { it.size.toLong() == entry.size }
     }
@@ -139,7 +143,7 @@ class AndroidJniLoader private constructor(
             val root = guestRoot ?: Files.createTempDirectory("yingzhou-jni-").also { guestRoot = it }
             val runtime = AndroidJniGuest(
                 abi, root.toFile(), ::asset, { entries.getJarEntry("$it.class") != null }, ::classHierarchy, ::archiveClass,
-                GuestStorage(dataDir.toPath()),
+                GuestStorage(dataDir.toPath()), ::resource, this,
             )
             GuestSlot(runtime).also(guests::add)
         }

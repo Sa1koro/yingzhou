@@ -23,6 +23,7 @@ class JsModules(
     private val cacheDir: File? = null,
     private val maxAgeMs: Long = TimeUnit.DAYS.toMillis(7),
     private val log: (String) -> Unit = {},
+    private val assets: File? = null,
 ) {
     private val memory = ConcurrentHashMap<String, String>()
 
@@ -42,7 +43,8 @@ class JsModules(
             name.contains("模板.js") -> bundled("模板.js")
             name.contains("cat.js") -> bundled("cat.js")
             name.startsWith("http://") || name.startsWith("https://") -> remote(name)
-            name.startsWith("assets://") -> bundled(name.removePrefix("assets://").removePrefix("js/lib/"))
+            name.startsWith("assets://") -> asset(name.removePrefix("assets://"))
+                ?: bundled(name.removePrefix("assets://").removePrefix("js/lib/"))
             name.startsWith("clan://") || name.startsWith("file://") ->
                 remote(locator.clanToAddress(name.replace("file://", "clan://localhost/")))
             else -> bundled(name.substringAfterLast('/'))
@@ -52,6 +54,14 @@ class JsModules(
 
     fun bundled(file: String): String? = memory.getOrPut("bundle:$file") {
         javaClass.getResourceAsStream("/tvbox/js/lib/$file")?.use { String(it.readBytes(), Charsets.UTF_8) } ?: return null
+    }
+
+    private fun asset(name: String): String? {
+        val root = assets?.canonicalFile ?: return null
+        val target = File(root, name).canonicalFile
+        return target.takeIf { it.toPath().startsWith(root.toPath()) && it.isFile }?.let {
+            memory.getOrPut("bundle:asset:$name") { it.readText() }
+        }
     }
 
     private fun remote(url: String): String? {

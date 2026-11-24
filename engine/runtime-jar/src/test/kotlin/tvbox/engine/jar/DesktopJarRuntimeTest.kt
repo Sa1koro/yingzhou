@@ -231,6 +231,45 @@ class DesktopJarRuntimeTest {
         assertNull(storage.attributes("$guestRoot/files/.. /outside.dex"))
         assertNull(storage.attributes("$guestRoot/files/payload.dex:secret"))
         assertNull(storage.attributes("$guestRoot/outside.dex"))
+        assertTrue(!storage.setWritable("$guestRoot/files/../outside.dex", false, ownerOnly = true))
+        assertTrue(!storage.delete("$guestRoot/files/../outside.dex"))
+        assertTrue(!storage.delete("$guestRoot/files"))
+        val path = "$guestRoot/files/payload.dex"
+        val payload = File(dir, "files/payload.dex")
+        assertTrue(storage.setWritable(path, false, ownerOnly = false))
+        val dos = java.nio.file.Files.getFileAttributeView(payload.toPath(), java.nio.file.attribute.DosFileAttributeView::class.java)
+        val posix = java.nio.file.Files.getFileAttributeView(payload.toPath(), java.nio.file.attribute.PosixFileAttributeView::class.java)
+        if (posix != null) {
+            assertTrue(posix.readAttributes().permissions().none { it.name.endsWith("_WRITE") })
+        } else {
+            assertTrue(dos.readAttributes().isReadOnly)
+        }
+        assertTrue(storage.setWritable(path, true, ownerOnly = true))
+        assertTrue(storage.delete(path))
+        assertTrue(!payload.exists())
+        assertEquals("private", File(dir, "outside.dex").readText())
+    }
+
+    @Test
+    fun `guest output publishes only complete files in app storage`() {
+        val storage = GuestStorage(dir.toPath())
+        val guestCache = storage.appDirectory("cache")
+        val destination = File(dir, "cache/payload.dex").also { it.writeText("previous") }
+        val payload = "$guestCache/payload.dex"
+        val data = "wrapped".toByteArray()
+        storage.openOutput(payload).also { stream ->
+            stream.write(data, 1, 5)
+            assertEquals("previous", destination.readText())
+            stream.abort()
+        }
+        assertEquals("previous", destination.readText())
+        storage.openOutput(payload).also { stream ->
+            stream.write(data, 1, 5)
+            stream.close()
+        }
+        assertEquals("rappe", destination.readText())
+        assertEquals(listOf("payload.dex"), destination.parentFile.list()!!.toList())
+        org.junit.jupiter.api.Assertions.assertThrows(java.io.IOException::class.java) { storage.openOutput("$guestCache/../outside.dex") }
     }
 
     @Test

@@ -19,7 +19,7 @@ import java.util.zip.ZipEntry;
  * ({@link #converter}). Classes are defined by this loader, so
  * {@code getClass().getClassLoader()} is the loader the spider created.
  */
-public class BaseDexClassLoader extends ClassLoader {
+public class BaseDexClassLoader extends ClassLoader implements AutoCloseable {
 
     static { registerAsParallelCapable(); }
 
@@ -139,6 +139,22 @@ public class BaseDexClassLoader extends ClassLoader {
 
     public boolean isFunctional() {
         return !jars.isEmpty();
+    }
+
+    @Override
+    public void close() throws IOException {
+        IOException failure = null;
+        for (JarFile jar : jars) {
+            try {
+                jar.close();
+            } catch (IOException error) {
+                if (failure == null) failure = error;
+                else failure.addSuppressed(error);
+            }
+        }
+        jars.clear();
+        jarFiles.clear();
+        if (failure != null) throw failure;
     }
 
     public String findLibrary(String name) {

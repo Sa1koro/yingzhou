@@ -78,7 +78,8 @@ class SpiderSource(
     internal class DriveSignInRequired(val prompt: DriveSignInPrompt) : Exception()
 
     internal suspend fun play(line: String, episodeId: String, offerDriveSignIn: Boolean): RawPlay = spider().run {
-        val text = play(line, episodeId, vipFlags())
+        val text = if (offerDriveSignIn) playWithSignIn(line, episodeId, vipFlags()) { throw DriveSignInRequired(it) }
+            else play(line, episodeId, vipFlags())
         if (offerDriveSignIn && !text.isNullOrBlank()) {
             driveSignIn.start(this, text)?.let { throw DriveSignInRequired(it) }
         }
@@ -91,7 +92,7 @@ class SpiderSource(
     }
 
     internal suspend fun pollDriveSignIn(handle: String): DriveSignInStatus =
-        spider?.let { driveSignIn.poll(it, handle) } ?: DriveSignInStatus("expired")
+        spider?.let { it.pollHostedSignIn(handle) ?: driveSignIn.poll(it, handle) } ?: DriveSignInStatus("expired")
 
     suspend fun proxy(params: Map<String, String>): ProxyResponse? = spider().proxy(params)
 

@@ -61,7 +61,11 @@ class _DriveSignInDialogState extends State<DriveSignInDialog> {
             : Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  QrView(data: widget.prompt.qrUrl),
+                  if (widget.prompt.image case final image?)
+                    Image.network(image, width: 220, height: 220,
+                        errorBuilder: (_, _, _) => const Text('无法载入站点提供的二维码。'))
+                  else
+                    QrView(data: widget.prompt.qrUrl),
                   const SizedBox(height: 12),
                   const Text('请用手机扫描站点提供的二维码。授权成功后会重试当前剧集。'),
                 ],

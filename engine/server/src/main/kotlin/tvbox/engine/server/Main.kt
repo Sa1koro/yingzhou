@@ -120,6 +120,8 @@ fun main(args: Array<String>) {
     // What jar spiders request through the host's classes (com.github.catvod.net.OkHttp) follows the same rules.
     tvbox.engine.jarhost.HostBridge.baseClient = client
     tvbox.engine.jarhost.HostBridge.playbackClient = playbackClient
+    val scriptBundles = argValue(args, "--yingxia-script-hosts")?.let(::File)
+    val scriptAssets = scriptBundles?.let { File(it, "ScriptHost/assets") }
     val jsRuntime = JsRuntime(
         JsEnvironment(
             modules = JsModules(moduleClient, locator, cacheDir = dataDir?.let { File(it, "js-cache") }, log = { System.err.println(it) }),
@@ -132,12 +134,23 @@ fun main(args: Array<String>) {
     )
     // Jar spiders keep their app data and the converted jars on disk even in --demo mode.
     val work = dataDir ?: File(System.getProperty("java.io.tmpdir"), if (check) "tvbox-next-check" else "tvbox-next-engine-$port")
-    val jarRuntime = DesktopJarRuntime(
-        dataDir = File(work, "spider"),
-        jars = JarRepository(moduleClient, locator, File(work, "cache/jar")),
-        port = { port },
-        cacheDir = File(work, "cache/d2j"),
-    )
+    val lite = scriptAssets?.takeIf { it.isDirectory }?.let { assets ->
+        YingxiaLiteSites(assets, JsEnvironment(
+            modules = JsModules(moduleClient, locator, File(work, "yingxia/lite-modules"), assets = assets),
+            http = JsHttp(client), playbackHttp = JsHttp(playbackClient),
+            local = FileJsLocalStore(File(work, "yingxia/lite-local.json")), proxyUrl = "$local/proxy",
+        ), System.err::println)
+    }
+    val jars = JarRepository(moduleClient, locator, File(work, "cache/jar"))
+    val desktopJar = DesktopJarRuntime(File(work, "spider"), jars, { port }, File(work, "cache/d2j"))
+    val yingxiaBundle = argValue(args, "--yingxia-host")?.let(::File)
+    val jarRuntime = if (yingxiaBundle != null) {
+        val host = YingxiaProcessHost(yingxiaBundle, File(work, "yingxia/processes"), System.err::println)
+        YingxiaJarRuntime(host, jars, File(work, "yingxia"), desktopJar, lite, System.err::println)
+    } else desktopJar
+    fun yingxiaScript(kind: String, directory: String) = scriptBundles?.let {
+        YingxiaScriptRuntime(kind, File(it, directory), File(work, "yingxia"), moduleClient, locator, System.err::println)
+    }?.takeIf { it.available }
     // Python spiders run in a Python process of their own, on a Python found on this machine (or downloaded when the
     // user asks for it in the app). A check that leaves "py" out does not look for one.
     val pyRuntime = if (checkOnly != null && "py" !in checkOnly) null else tvbox.engine.py.PyRuntime(
@@ -176,7 +189,8 @@ fun main(args: Array<String>) {
         // A check limited to some kinds must not run anything else. Skipping the sites is not enough: a live list
         // served through a spider's proxy, or a jar parser, loads the config's jar too. So without "jar" (or "js")
         // in --only that runtime does not exist in this engine at all.
-        runtimes = listOfNotNull(jarRuntime, jsRuntime, pyRuntime).filter { checkOnly == null || it.kind in checkOnly },
+        runtimes = listOfNotNull(jarRuntime, yingxiaScript("js", "ScriptHost") ?: jsRuntime,
+            yingxiaScript("py", "PythonHost") ?: pyRuntime).filter { checkOnly == null || it.kind in checkOnly },
         sniffer = sniffer,
         githubProxy = githubProxy,
         network = network,
@@ -190,7 +204,7 @@ fun main(args: Array<String>) {
         log = { System.err.println(it) },
     )
     engine.downloads = downloads
-    val demo = if ("--demo" in args) DemoSite() else null
+    val demo = if ("--demo" in args) DemoSite(if (yingxiaBundle == null) "spider.jar" else "spider-host.jar") else null
     // The user's cloud drives and folders (AList / OpenList, WebDAV, folders of this machine), kept with the data.
     val drives = tvbox.engine.core.drive.DriveService(store, client, local, localFolders = true, log = { System.err.println(it) })
     // --drive-folder <folder>, any number of times: a folder of this machine as a drive (an engine without a screen).
